@@ -1,0 +1,100 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-whatsapp: #25D366;
+  --color-tiktok: #000000;
+  --color-brand: #7C3AED;
+  --color-brand-light: #A78BFA;
+  --color-bg-dark: #030303;
+  --color-card-bg: rgba(10, 10, 10, 0.6);
+}
+
+@layer base {
+  body {
+    @apply bg-bg-dark text-zinc-300 selection:bg-brand/40 font-sans antialiased;
+    background-image: 
+      radial-gradient(at 0% 0%, rgba(124, 58, 237, 0.08) 0px, transparent 50%),
+      radial-gradient(at 100% 100%, rgba(124, 58, 237, 0.08) 0px, transparent 50%),
+      radial-gradient(at 50% 50%, rgba(124, 58, 237, 0.03) 0px, transparent 80%);
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-card-bg backdrop-blur-3xl border border-white/[0.05] rounded-[2.5rem] overflow-hidden shadow-2xl shadow-black/60;
+  }
+  
+  .glow-border {
+    @apply relative transition-all duration-700;
+  }
+  
+  .glow-border::after {
+    content: '';
+    @apply absolute inset-0 rounded-[inherit] border border-white/5 pointer-events-none transition-all duration-700;
+  }
+  
+  .glow-border:hover::after {
+    @apply border-brand/30 ring-1 ring-brand/20;
+  }
+
+  .whatsapp-glow {
+    @apply relative;
+  }
+
+  .whatsapp-glow::before {
+    content: '';
+    @apply absolute -inset-4 bg-whatsapp/20 blur-3xl rounded-full opacity-0 transition-opacity duration-700 -z-10;
+  }
+
+  .whatsapp-glow:hover::before {
+    @apply opacity-100;
+  }
+
+  .btn-modern {
+    @apply px-8 py-4 bg-white text-black hover:bg-zinc-100 rounded-2xl font-extrabold transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-2xl shadow-white/10;
+  }
+
+  .btn-outline {
+    @apply px-8 py-4 bg-transparent border border-white/10 hover:bg-white/5 text-white rounded-2xl font-semibold transition-all active:scale-95 flex items-center justify-center gap-2;
+  }
+
+  .input-modern {
+    @apply w-full bg-white/[0.03] border border-white/10 rounded-2xl px-6 py-4 focus:outline-none focus:ring-4 focus:ring-brand/10 focus:border-brand/40 transition-all placeholder:text-zinc-600 text-white;
+  }
+
+  .brand-gradient {
+    @apply bg-gradient-to-r from-brand to-brand-light bg-clip-text text-transparent;
+  }
+}
+
+/* Animations */
+@keyframes float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-10px); }
+  100% { transform: translateY(0px); }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+}
+::-webkit-scrollbar-track {
+  background: #050505;
+}
+::-webkit-scrollbar-thumb {
+  background: #1a1a1a;
+  border-radius: 20px;
+  border: 2px solid #050505;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #252525;
+}
+ 
