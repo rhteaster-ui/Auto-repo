@@ -1,76 +1,58 @@
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
 @import "tailwindcss";
 
 @theme {
   --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
-
-  --color-whatsapp: #25d366;
-  --color-tiktok: #000000;
   --color-brand: #7c3aed;
   --color-brand-light: #a78bfa;
-  --color-bg-dark: #040406;
-  --color-card-bg: rgba(12, 12, 16, 0.65);
+  --color-bg-dark: #050509;
+  --color-card-bg: rgba(16, 16, 24, 0.72);
 }
 
 @layer base {
-  html {
-    scroll-behavior: smooth;
+  * {
+    -webkit-tap-highlight-color: transparent;
   }
 
   body {
-    @apply bg-bg-dark text-zinc-300 selection:bg-brand/40 font-sans antialiased;
+    @apply bg-bg-dark text-zinc-200 font-sans antialiased;
     background-image:
-      radial-gradient(at 0% 0%, rgba(124, 58, 237, 0.09) 0px, transparent 50%),
-      radial-gradient(at 100% 100%, rgba(124, 58, 237, 0.08) 0px, transparent 50%),
-      radial-gradient(at 50% 50%, rgba(124, 58, 237, 0.03) 0px, transparent 80%);
+      radial-gradient(at 0% 0%, rgba(124, 58, 237, 0.08) 0px, transparent 50%),
+      radial-gradient(at 100% 100%, rgba(124, 58, 237, 0.06) 0px, transparent 50%);
   }
 }
 
 @layer components {
-  .glass-card {
-    @apply bg-card-bg backdrop-blur-2xl border border-white/[0.06] rounded-2xl overflow-hidden shadow-xl shadow-black/50;
-  }
-
-  .glow-border {
-    @apply relative transition-all duration-300;
-  }
-
-  .glow-border::after {
-    content: '';
-    @apply absolute inset-0 rounded-[inherit] border border-white/5 pointer-events-none;
-  }
-
-  .glow-border:hover::after {
-    @apply border-brand/30;
+  .app-card {
+    @apply bg-card-bg border border-white/[0.08] rounded-xl shadow-lg shadow-black/30;
   }
 
   .btn-modern {
-    @apply px-6 py-3 bg-white text-black hover:bg-zinc-100 rounded-xl font-bold transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2;
+    @apply px-4 py-2 bg-white text-black rounded-lg font-semibold transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2;
   }
 
   .input-modern {
-    @apply w-full bg-white/[0.03] border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand/40 transition-all placeholder:text-zinc-600 text-white;
+    @apply w-full bg-white/[0.04] border border-white/12 rounded-lg px-3 py-2.5 text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-brand/20 focus:border-brand/35;
   }
 
-  .brand-gradient {
-    @apply bg-gradient-to-r from-brand to-brand-light bg-clip-text text-transparent;
+  .icon-btn {
+    @apply w-7 h-7 rounded-md bg-white/[0.05] border border-white/10 flex items-center justify-center text-zinc-400 hover:text-white;
+  }
+
+  .link-item {
+    @apply text-xs text-zinc-300 border border-white/10 bg-white/[0.02] rounded-lg px-3 py-2 flex items-center justify-between hover:bg-white/[0.05];
   }
 }
 
 ::-webkit-scrollbar {
-  width: 9px;
+  width: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #060607;
+  background: #0a0a0e;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1e1e28;
+  background: #23232d;
   border-radius: 20px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #2a2a36;
 }

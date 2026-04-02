@@ -1,11 +1,13 @@
 # Auto-repo
 
-Auto-repo adalah aplikasi web untuk mengunggah file ZIP, membuat repository GitHub secara otomatis, dan memantau riwayat deployment dalam satu dashboard modern yang ramah mobile.
+Auto-repo (RepoFlow) adalah web app bergaya native untuk pengguna mobile, dengan alur sederhana: halaman sambutan, lalu masuk ke aplikasi utama dengan toolbar bawah.
 
 ## Fitur utama
 
-- Validasi token GitHub dengan alur onboarding (cek apakah user sudah punya akun GitHub atau belum).
-- Deploy ZIP ke repository GitHub baru secara otomatis.
-- Pengecekan ketersediaan nama repository sebelum deploy.
-- Riwayat repository dengan pencarian cepat, copy URL, buka repo, dan hapus repo.
-- UI/UX terbaru yang lebih ringkas dan nyaman di perangkat HP.
+- **Dashboard**: ringkasan total repository + grafik aktivitas deploy 7 hari.
+- **Upload**: upload file **.zip** atau **.html** lalu deploy otomatis ke repository GitHub baru.
+- **Tools**: cari repository, salin URL, buka repo, dan hapus repo.
+- **Info Web**: informasi aplikasi, profil developer, serta link komunitas/sosial media.
+- **Onboarding GitHub**: user ditanya dulu apakah sudah punya akun GitHub sebelum diminta token.
+
+Semua tampilan telah dioptimalkan agar card lebih kecil/sedang dan nyaman dipakai di layar HP.
