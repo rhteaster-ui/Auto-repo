@@ -292,7 +292,10 @@ export default function App() {
     setExtractProgress(8);
     const list = Array.from(files) as File[];
     const nextEntries: UploadEntry[] = [];
-    setPickedFileNames(list.map((f) => f.name));
+    setPickedFileNames((prev) => {
+      const merged = new Set([...prev, ...list.map((f) => f.name)]);
+      return [...merged];
+    });
 
     for (let index = 0; index < list.length; index += 1) {
       const file = list[index];
@@ -347,7 +350,6 @@ export default function App() {
       setStatus('Menganalisis file...');
       await extractEntries(e.target.files);
     } catch {
-      setUploadEntries([]);
       setError('File tidak bisa dibaca. Pastikan ZIP valid atau file tidak rusak.');
     } finally {
       e.target.value = '';
