@@ -58,6 +58,14 @@ type StagedFile = {
 };
 
 const WEB_ICON = 'https://res.cloudinary.com/dwiozm4vz/image/upload/v1775203338/nalaxl1mo6eltckuzpoh.png';
+const DEV_PROFILE_IMAGE = 'https://res.cloudinary.com/dwiozm4vz/image/upload/v1772959730/ootglrvfmykn6xsto7rq.png';
+
+const SOCIAL_LINKS = [
+  { label: 'WhatsApp Channel', url: 'https://whatsapp.com/channel/0029VbBjyjlJ93wa6hwSWa0p' },
+  { label: 'Instagram', url: 'https://www.instagram.com/rahmt_nhw?igsh=MWQwcnB3bTA2ZnVidg==' },
+  { label: 'TikTok', url: 'https://www.tiktok.com/@r_hmtofc?_r=1&_t=ZS-94KRfWQjeUu' },
+  { label: 'Telegram', url: 'https://t.me/rAi_engine' },
+];
 
 const NAV_ITEMS: { id: AppTab; label: string; icon: React.ReactNode }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: <Home size={16} /> },
@@ -86,6 +94,13 @@ const bytesToReadable = (value: number) => {
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.min(Math.floor(Math.log(value) / Math.log(1024)), sizes.length - 1);
   return `${(value / (1024 ** i)).toFixed(i === 0 ? 0 : 2)} ${sizes[i]}`;
+};
+
+const formatActionLabel = (action: ActivityLog['action']) => {
+  if (action === 'create_repo') return 'Repo dibuat';
+  if (action === 'sync_repo') return 'Sinkronisasi';
+  if (action === 'update_repo') return 'Perubahan file';
+  return 'Repo dihapus';
 };
 
 const toBase64 = async (file: File) => {
@@ -645,7 +660,7 @@ export default function App() {
                   <label key={entry.id} className="flex items-start gap-2 text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5">
                     <input type="checkbox" checked={entry.include} onChange={() => toggleUploadEntry(entry.id)} className="mt-0.5" />
                     <FileJson size={13} className="text-zinc-500 shrink-0 mt-0.5" />
-                    <span className="text-zinc-300 break-all max-w-[72%]" title={entry.path}>{entry.path}</span>
+                    <span className="text-zinc-300 break-all flex-1" title={entry.path}>{entry.path}</span>
                     <span className="text-[10px] text-zinc-500 ml-auto shrink-0">{bytesToReadable(entry.size)}</span>
                   </label>
                 ))}
@@ -665,6 +680,20 @@ export default function App() {
     <div className="space-y-3">
       <section className="app-card p-3.5 space-y-2.5">
         <h3 className="text-sm font-semibold text-white">Control Repository (real-time sync, tambah/hapus file)</h3>
+        <div className="grid md:grid-cols-3 gap-2">
+          <div className="rounded-xl border border-white/10 bg-white/[0.02] p-2.5">
+            <p className="text-xs font-semibold text-white">1) Pilih repo</p>
+            <p className="text-[11px] text-zinc-400 mt-1">Cari repo lalu klik namanya untuk buka kontrol file lengkap.</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-white/[0.02] p-2.5">
+            <p className="text-xs font-semibold text-white">2) Atur perubahan</p>
+            <p className="text-[11px] text-zinc-400 mt-1">Centang file untuk dihapus, lalu upload banyak file/folder untuk update.</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-white/[0.02] p-2.5">
+            <p className="text-xs font-semibold text-white">3) Simpan aman</p>
+            <p className="text-[11px] text-zinc-400 mt-1">Sistem cek konflik dulu agar edit manual di GitHub tidak tertimpa.</p>
+          </div>
+        </div>
         <div className="relative"><Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" /><input type="text" value={searchProject} onChange={(e) => setSearchProject(e.target.value)} placeholder="Cari repository" className="input-modern pl-9 text-sm" /></div>
       </section>
       <section className="space-y-2">{renderRepoCards()}</section>
@@ -683,10 +712,11 @@ export default function App() {
             <div className="space-y-2">
               <p className="text-xs text-zinc-300">File di repo (root + nested folder)</p>
               <div className="max-h-56 overflow-y-auto pr-1 space-y-1.5">
+                {repoFiles.length === 0 && <p className="text-[11px] text-zinc-500">Belum ada file (atau sedang sinkronisasi).</p>}
                 {repoFiles.map((file) => (
                   <label key={file.path} className="text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5 flex items-start gap-2">
                     <input type="checkbox" checked={deletedPaths.includes(file.path)} onChange={() => toggleDeletePath(file.path)} className="mt-0.5" />
-                    <span className="break-all text-zinc-300">{file.path}</span>
+                    <span className="break-all text-zinc-300 flex-1">{file.path}</span>
                     <span className="text-[10px] text-zinc-500 ml-auto">{bytesToReadable(file.size)}</span>
                   </label>
                 ))}
@@ -709,10 +739,11 @@ export default function App() {
               <input ref={updateInputRef} type="file" multiple className="hidden" onChange={handleStageFiles} />
               <input ref={updateFolderInputRef} type="file" multiple className="hidden" onChange={handleStageFiles} {...({ webkitdirectory: 'true', directory: 'true' } as any)} />
               <div className="max-h-44 overflow-y-auto pr-1 space-y-1.5">
+                {stagedFiles.length === 0 && <p className="text-[11px] text-zinc-500">Belum ada file staging.</p>}
                 {stagedFiles.map((file) => (
                   <div key={file.id} className="text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5 flex items-start gap-2">
                     <FileCode2 size={12} className="mt-0.5 text-zinc-500" />
-                    <span className="break-all text-zinc-300">{file.path}</span>
+                    <span className="break-all text-zinc-300 flex-1">{file.path}</span>
                     <button className="icon-btn w-6 h-6 ml-auto" onClick={() => removeStagedFile(file.path)}><Trash2 size={12} /></button>
                   </div>
                 ))}
@@ -728,9 +759,59 @@ export default function App() {
     </div>
   );
 
-  const renderInfo = () => (
+const renderInfo = () => (
     <div className="space-y-3">
-      <section className="app-card p-3.5 space-y-2"><div className="flex items-center gap-2"><img src={WEB_ICON} alt="RepoFlow icon" className="w-8 h-8 rounded-lg border border-white/15" referrerPolicy="no-referrer" /><h3 className="text-sm font-semibold text-white">Tentang Website</h3></div><p className="text-xs text-zinc-400 leading-relaxed">RepoFlow sekarang mendukung kontrol update/hapus file repo secara real-time, multi-file upload, preview ZIP lebih rapi, dan histori aktivitas.</p></section>
+      <section className="app-card p-3.5 space-y-2">
+        <div className="flex items-center gap-2">
+          <img src={WEB_ICON} alt="RepoFlow icon" className="w-8 h-8 rounded-lg border border-white/15" referrerPolicy="no-referrer" />
+          <h3 className="text-sm font-semibold text-white">Tentang Website</h3>
+        </div>
+        <p className="text-xs text-zinc-400 leading-relaxed">
+          RepoFlow adalah web untuk membuat repo baru, upload banyak file/folder/ZIP, kontrol file nested, dan update/hapus file ke GitHub dengan sinkronisasi berkala agar lebih aman dari bentrok perubahan.
+        </p>
+        <ul className="space-y-1 text-[11px] text-zinc-300">
+          <li>• Upload multi-file + folder + ZIP dalam satu alur.</li>
+          <li>• Kontrol penuh isi repo (lihat semua file root & folder, hapus, tambah, update).</li>
+          <li>• Riwayat aktivitas dan waktu pembuatan/pembaruan repo tersimpan lokal.</li>
+        </ul>
+      </section>
+
+      <section className="app-card p-3.5 space-y-2">
+        <h3 className="text-sm font-semibold text-white">Informasi Dev</h3>
+        <div className="flex items-center gap-3">
+          <img src={DEV_PROFILE_IMAGE} alt="Developer profile" className="w-12 h-12 rounded-xl border border-white/15 object-cover" referrerPolicy="no-referrer" />
+          <div>
+            <p className="text-xs text-white font-semibold">Rahmat / rAi Engine</p>
+            <p className="text-[11px] text-zinc-500">Maintainer & developer RepoFlow.</p>
+          </div>
+        </div>
+      </section>
+
+      <section className="app-card p-3.5 space-y-2">
+        <h3 className="text-sm font-semibold text-white">Sosial Media Dev</h3>
+        <div className="grid md:grid-cols-2 gap-2">
+          {SOCIAL_LINKS.map((item) => (
+            <a key={item.url} href={item.url} target="_blank" rel="noreferrer" className="rounded-xl border border-white/10 bg-white/[0.02] px-2.5 py-2 text-xs text-zinc-300 flex items-center justify-between hover:border-brand/35 hover:text-white">
+              <span>{item.label}</span>
+              <ExternalLink size={13} />
+            </a>
+          ))}
+        </div>
+      </section>
+
+      <section className="app-card p-3.5 space-y-2">
+        <h3 className="text-sm font-semibold text-white">History & Catatan Update</h3>
+        <div className="space-y-1.5 max-h-52 overflow-auto pr-1">
+          {logs.length === 0 && <p className="text-xs text-zinc-500">Belum ada catatan update.</p>}
+          {logs.map((log) => (
+            <div key={log.id} className="rounded-lg border border-white/10 bg-white/[0.02] px-2.5 py-2">
+              <p className="text-[11px] text-zinc-400">{new Date(log.createdAt).toLocaleString('id-ID')}</p>
+              <p className="text-xs text-white mt-0.5">{log.repoName} · {formatActionLabel(log.action)}</p>
+              <p className="text-[11px] text-zinc-400 mt-0.5 break-words">{log.detail}</p>
+            </div>
+          ))}
+        </div>
+      </section>
     </div>
   );
 
