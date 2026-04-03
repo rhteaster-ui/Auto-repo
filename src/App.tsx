@@ -57,6 +57,14 @@ type StagedFile = {
   contentBase64: string;
 };
 
+type FlatPathRow = {
+  path: string;
+  depth: number;
+  name: string;
+  type: 'folder' | 'file';
+  size?: number;
+};
+
 const WEB_ICON = 'https://res.cloudinary.com/dwiozm4vz/image/upload/v1775203338/nalaxl1mo6eltckuzpoh.png';
 
 const NAV_ITEMS: { id: AppTab; label: string; icon: React.ReactNode }[] = [
@@ -95,6 +103,38 @@ const toBase64 = async (file: File) => {
   return btoa(binary);
 };
 
+const buildFlatRows = (paths: { path: string; size?: number }[]): FlatPathRow[] => {
+  const folderSet = new Set<string>();
+  const rows: FlatPathRow[] = [];
+
+  paths.forEach((entry) => {
+    const parts = entry.path.split('/').filter(Boolean);
+    let acc = '';
+    parts.slice(0, -1).forEach((part, index) => {
+      acc = acc ? `${acc}/${part}` : part;
+      if (!folderSet.has(acc)) {
+        folderSet.add(acc);
+        rows.push({
+          path: acc,
+          depth: index,
+          name: part,
+          type: 'folder',
+        });
+      }
+    });
+
+    rows.push({
+      path: entry.path,
+      depth: Math.max(0, parts.length - 1),
+      name: parts[parts.length - 1] || entry.path,
+      type: 'file',
+      size: entry.size,
+    });
+  });
+
+  return rows.sort((a, b) => a.path.localeCompare(b.path));
+};
+
 export default function App() {
   const [token, setToken] = useState('');
   const [user, setUser] = useState<GitHubToken | null>(null);
@@ -128,6 +168,7 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const updateInputRef = useRef<HTMLInputElement>(null);
+  const appendInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadUserData();
@@ -165,6 +206,11 @@ export default function App() {
   const selectedEntries = uploadEntries.filter((entry) => entry.include);
   const selectedTotalSize = selectedEntries.reduce((sum, entry) => sum + entry.size, 0);
   const selectedProject = projects.find((p) => p.id === selectedProjectId) || null;
+  const uploadRows = useMemo(
+    () => buildFlatRows(uploadEntries.map((entry) => ({ path: entry.path, size: entry.size }))),
+    [uploadEntries],
+  );
+  const repoRows = useMemo(() => buildFlatRows(repoFiles.map((file) => ({ path: file.path, size: file.size }))), [repoFiles]);
 
   const loadUserData = async () => {
     const savedTokens = await db.tokens.toArray();
@@ -283,8 +329,39 @@ export default function App() {
     }
   };
 
+  const appendFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files?.length) return;
+    try {
+      setStatus('Menambahkan file baru...');
+      const list = Array.from(e.target.files);
+      const additional = await Promise.all(list.map(async (file) => ({
+        id: `${file.name}:${crypto.randomUUID()}`,
+        path: file.webkitRelativePath || file.name,
+        size: file.size,
+        source: 'single' as const,
+        include: true,
+        contentBase64: await toBase64(file),
+      })));
+
+      setUploadEntries((prev) => {
+        const map = new Map(prev.map((item) => [item.path, item]));
+        additional.forEach((item) => map.set(item.path, item));
+        return [...map.values()].sort((a, b) => a.path.localeCompare(b.path));
+      });
+      setPickedFileNames((prev) => [...new Set([...prev, ...list.map((f) => f.name)])]);
+    } catch {
+      setError('Gagal menambahkan file update.');
+    } finally {
+      e.target.value = '';
+    }
+  };
+
   const toggleUploadEntry = (id: string) => {
     setUploadEntries((prev) => prev.map((item) => (item.id === id ? { ...item, include: !item.include } : item)));
+  };
+
+  const removeUploadEntry = (id: string) => {
+    setUploadEntries((prev) => prev.filter((item) => item.id !== id));
   };
 
   const copyToClipboard = (text: string, id: number) => {
@@ -613,18 +690,35 @@ export default function App() {
             <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="rounded-xl border border-white/10 bg-black/20 p-2.5">
               <div className="flex items-center justify-between mb-2"><p className="text-xs text-zinc-300">Preview ekstrak ({selectedEntries.length}/{uploadEntries.length})</p><p className="text-[11px] text-zinc-500">{bytesToReadable(selectedTotalSize)}</p></div>
               <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
-                {uploadEntries.map((entry) => (
-                  <label key={entry.id} className="flex items-start gap-2 text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5">
-                    <input type="checkbox" checked={entry.include} onChange={() => toggleUploadEntry(entry.id)} className="mt-0.5" />
-                    <FileJson size={13} className="text-zinc-500 shrink-0 mt-0.5" />
-                    <span className="text-zinc-300 break-all">{entry.path}</span>
-                    <span className="text-[10px] text-zinc-500 ml-auto shrink-0">{bytesToReadable(entry.size)}</span>
-                  </label>
-                ))}
+                {uploadRows.map((row) => {
+                  const entry = row.type === 'file' ? uploadEntries.find((item) => item.path === row.path) : null;
+                  if (row.type === 'folder') {
+                    return (
+                      <div key={row.path} className="text-xs rounded-lg px-2 py-1.5 bg-white/[0.02] border border-white/5 text-zinc-500 flex items-center gap-2" style={{ paddingLeft: `${8 + row.depth * 14}px` }}>
+                        <FileArchive size={12} />
+                        <span className="break-all whitespace-normal">{row.name}/</span>
+                      </div>
+                    );
+                  }
+
+                  if (!entry) return null;
+                  return (
+                    <label key={entry.id} className="flex items-start gap-2 text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5" style={{ paddingLeft: `${8 + row.depth * 14}px` }}>
+                      <input type="checkbox" checked={entry.include} onChange={() => toggleUploadEntry(entry.id)} className="mt-0.5" />
+                      <FileJson size={13} className="text-zinc-500 shrink-0 mt-0.5" />
+                      <span className="text-zinc-300 break-all whitespace-normal" title={entry.path}>{row.name}</span>
+                      <span className="text-[10px] text-zinc-500 ml-auto shrink-0">{bytesToReadable(entry.size)}</span>
+                      <button type="button" className="icon-btn w-6 h-6" onClick={() => removeUploadEntry(entry.id)}><Trash2 size={11} /></button>
+                    </label>
+                  );
+                })}
               </div>
             </motion.div>
           )}
         </AnimatePresence>
+
+        <button onClick={() => appendInputRef.current?.click()} className="w-full rounded-lg border border-white/15 py-2 text-xs text-zinc-200">Tambah file lagi (tanpa reset daftar)</button>
+        <input type="file" onChange={appendFileChange} className="hidden" multiple ref={appendInputRef} />
 
         <button onClick={deployRepo} disabled={isDeploying || !user || !repoName || repoCheckStatus === 'exists' || selectedEntries.length === 0} className="btn-modern w-full text-sm py-2.5">{isDeploying ? <><Loader2 size={15} className="animate-spin" /> {status}</> : <><Rocket size={15} /> Push repo baru ke GitHub</>}</button>
 
@@ -647,6 +741,7 @@ export default function App() {
             <div>
               <p className="text-sm font-semibold text-white">{selectedProject.repoName}</p>
               <p className="text-[11px] text-zinc-500">Terakhir sinkron: {selectedProject.lastSyncedAt ? new Date(selectedProject.lastSyncedAt).toLocaleString('id-ID') : '-'}</p>
+              <p className="text-[11px] text-zinc-500">Dibuat: {new Date(selectedProject.createdAt).toLocaleString('id-ID')} • Update: {new Date(selectedProject.updatedAt).toLocaleString('id-ID')}</p>
             </div>
             <button onClick={() => syncSelectedRepo()} className="icon-btn" disabled={syncingRepo}>{syncingRepo ? <Loader2 size={14} className="animate-spin" /> : <RefreshCcw size={14} />}</button>
           </div>
@@ -655,12 +750,14 @@ export default function App() {
             <div className="space-y-2">
               <p className="text-xs text-zinc-300">File di repo (root + nested folder)</p>
               <div className="max-h-56 overflow-y-auto pr-1 space-y-1.5">
-                {repoFiles.map((file) => (
-                  <label key={file.path} className="text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5 flex items-start gap-2">
-                    <input type="checkbox" checked={deletedPaths.includes(file.path)} onChange={() => toggleDeletePath(file.path)} className="mt-0.5" />
-                    <span className="break-all text-zinc-300">{file.path}</span>
-                    <span className="text-[10px] text-zinc-500 ml-auto">{bytesToReadable(file.size)}</span>
-                  </label>
+                {repoRows.map((row) => (
+                  row.type === 'folder'
+                    ? <div key={row.path} className="text-xs rounded-lg px-2 py-1.5 bg-white/[0.02] border border-white/5 text-zinc-500 flex items-center gap-2" style={{ paddingLeft: `${8 + row.depth * 14}px` }}><FileArchive size={12} /><span>{row.name}/</span></div>
+                    : <label key={row.path} className="text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5 flex items-start gap-2" style={{ paddingLeft: `${8 + row.depth * 14}px` }}>
+                      <input type="checkbox" checked={deletedPaths.includes(row.path)} onChange={() => toggleDeletePath(row.path)} className="mt-0.5" />
+                      <span className="break-all whitespace-normal text-zinc-300" title={row.path}>{row.name}</span>
+                      <span className="text-[10px] text-zinc-500 ml-auto">{bytesToReadable(row.size || 0)}</span>
+                    </label>
                 ))}
               </div>
             </div>
