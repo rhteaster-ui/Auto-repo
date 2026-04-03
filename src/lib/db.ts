@@ -16,6 +16,8 @@ export interface Project {
   updatedAt: number;
   lastSyncedAt?: number;
   totalFiles?: number;
+  lastAction?: string;
+  lastActionAt?: number;
 }
 
 export interface ActivityLog {
@@ -44,6 +46,14 @@ export class MyDatabase extends Dexie {
       logs: '++id, repoName, owner, action, createdAt',
     }).upgrade((tx) => tx.table('projects').toCollection().modify((project: Project) => {
       if (!project.updatedAt) project.updatedAt = project.createdAt;
+    }));
+    this.version(4).stores({
+      tokens: '++id, token, username',
+      projects: '++id, repoName, owner, createdAt, updatedAt, lastSyncedAt, lastActionAt',
+      logs: '++id, repoName, owner, action, createdAt',
+    }).upgrade((tx) => tx.table('projects').toCollection().modify((project: Project) => {
+      if (!project.lastActionAt) project.lastActionAt = project.updatedAt || project.createdAt;
+      if (!project.lastAction) project.lastAction = 'Repository dibuat';
     }));
   }
 }
