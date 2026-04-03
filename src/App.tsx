@@ -127,7 +127,9 @@ export default function App() {
   const [savingRepo, setSavingRepo] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const updateInputRef = useRef<HTMLInputElement>(null);
+  const updateFolderInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadUserData();
@@ -165,6 +167,14 @@ export default function App() {
   const selectedEntries = uploadEntries.filter((entry) => entry.include);
   const selectedTotalSize = selectedEntries.reduce((sum, entry) => sum + entry.size, 0);
   const selectedProject = projects.find((p) => p.id === selectedProjectId) || null;
+  const repoFolders = useMemo(() => {
+    const folders = new Set<string>();
+    repoFiles.forEach((file) => {
+      const parts = file.path.split('/');
+      for (let i = 1; i < parts.length; i += 1) folders.add(parts.slice(0, i).join('/'));
+    });
+    return [...folders].sort((a, b) => a.localeCompare(b));
+  }, [repoFiles]);
 
   const loadUserData = async () => {
     const savedTokens = await db.tokens.toArray();
@@ -238,11 +248,12 @@ export default function App() {
         for (let i = 0; i < paths.length; i += 1) {
           const p = paths[i];
           const zipFile = zip.files[p];
+          const fileBuffer = await zipFile.async('uint8array');
           const contentBase64 = await zipFile.async('base64');
           nextEntries.push({
             id: `${file.name}:${p}`,
             path: p,
-            size: zipFile._data?.uncompressedSize || 0,
+            size: fileBuffer.length,
             source: 'zip',
             include: true,
             contentBase64,
@@ -374,7 +385,7 @@ export default function App() {
     return { files, headSha: branchData.commit.sha };
   };
 
-  const syncSelectedRepo = async (project?: Project) => {
+  const syncSelectedRepo = async (project?: Project, opts?: { silent?: boolean }) => {
     const target = project || selectedProject;
     if (!target || !user) return;
 
@@ -387,9 +398,11 @@ export default function App() {
       setDeletedPaths([]);
       setStagedFiles([]);
       await upsertProjectMeta(target, { lastSyncedAt: Date.now(), totalFiles: snapshot.files.length });
-      await addLog({ repoName: target.repoName, owner: target.owner, action: 'sync_repo', detail: `Sinkronisasi ${snapshot.files.length} file.` });
-      setSuccess(`Repo ${target.repoName} tersinkron realtime.`);
-      setTimeout(() => setSuccess(null), 1600);
+      if (!opts?.silent) {
+        await addLog({ repoName: target.repoName, owner: target.owner, action: 'sync_repo', detail: `Sinkronisasi ${snapshot.files.length} file.` });
+        setSuccess(`Repo ${target.repoName} tersinkron realtime.`);
+        setTimeout(() => setSuccess(null), 1600);
+      }
     } catch (err: any) {
       setError(`Gagal sinkron: ${err?.message || 'unknown error'}`);
     } finally {
@@ -397,11 +410,20 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    if (tab !== 'tools' || !selectedProject || !user) return undefined;
+    syncSelectedRepo(selectedProject, { silent: true });
+    const intervalId = window.setInterval(() => {
+      syncSelectedRepo(selectedProject, { silent: true });
+    }, 15000);
+    return () => window.clearInterval(intervalId);
+  }, [tab, selectedProject, user]);
+
   const handleStageFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files?.length) return;
-    const files = Array.from(e.target.files);
+    const files = Array.from(e.target.files as FileList) as File[];
     const normalizedPrefix = folderPrefix.trim().replace(/^\/+|\/+$/g, '');
-    const staged = await Promise.all(files.map(async (f) => ({
+    const staged: StagedFile[] = await Promise.all(files.map(async (f) => ({
       id: crypto.randomUUID(),
       path: `${normalizedPrefix ? `${normalizedPrefix}/` : ''}${f.webkitRelativePath || f.name}`,
       size: f.size,
@@ -409,7 +431,7 @@ export default function App() {
     })));
 
     setStagedFiles((prev) => {
-      const map = new Map(prev.map((item) => [item.path, item]));
+      const map = new Map<string, StagedFile>(prev.map((item) => [item.path, item]));
       staged.forEach((item) => map.set(item.path, item));
       return [...map.values()].sort((a, b) => a.path.localeCompare(b.path));
     });
@@ -439,6 +461,7 @@ export default function App() {
 
       const conflicts = [...deletedPaths, ...stagedFiles.map((f) => f.path)].filter((path) => {
         const base = baseShas[path];
+        if (!base && latestMap[path]) return true;
         return Boolean(base && latestMap[path] && latestMap[path] !== base);
       });
 
@@ -603,7 +626,12 @@ export default function App() {
 
         <div onClick={() => !isDeploying && fileInputRef.current?.click()} className={`rounded-xl border border-dashed p-4 text-center ${pickedFileNames.length ? 'border-brand/40 bg-brand/[0.05]' : 'border-white/12 bg-white/[0.02]'}`}>
           <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" multiple />
+          <input type="file" ref={folderInputRef} onChange={handleFileChange} className="hidden" multiple {...({ webkitdirectory: 'true', directory: 'true' } as any)} />
           {pickedFileNames.length > 0 ? <div className="space-y-1.5"><FileArchive size={18} className="mx-auto text-brand-light" /><p className="text-xs text-white">{pickedFileNames.length} file terpilih</p></div> : <div className="space-y-1.5"><Upload size={18} className="mx-auto text-zinc-500" /><p className="text-xs text-zinc-300">Pilih banyak file sekaligus atau file ZIP</p></div>}
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <button onClick={() => fileInputRef.current?.click()} className="btn-modern text-xs py-2"><Upload size={13} /> Pilih File</button>
+          <button onClick={() => folderInputRef.current?.click()} className="btn-modern text-xs py-2"><FileArchive size={13} /> Pilih Folder</button>
         </div>
 
         {isExtracting && <div className="space-y-1.5"><p className="text-xs text-zinc-300 flex items-center gap-1.5"><Loader2 size={14} className="animate-spin" /> Ekstrak & analisis file...</p><div className="h-2 rounded-full bg-white/[0.05] overflow-hidden"><motion.div className="h-full bg-gradient-to-r from-brand to-brand-light" initial={{ width: 0 }} animate={{ width: `${extractProgress}%` }} /></div></div>}
@@ -617,7 +645,7 @@ export default function App() {
                   <label key={entry.id} className="flex items-start gap-2 text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5">
                     <input type="checkbox" checked={entry.include} onChange={() => toggleUploadEntry(entry.id)} className="mt-0.5" />
                     <FileJson size={13} className="text-zinc-500 shrink-0 mt-0.5" />
-                    <span className="text-zinc-300 break-all">{entry.path}</span>
+                    <span className="text-zinc-300 break-all max-w-[72%]" title={entry.path}>{entry.path}</span>
                     <span className="text-[10px] text-zinc-500 ml-auto shrink-0">{bytesToReadable(entry.size)}</span>
                   </label>
                 ))}
@@ -668,8 +696,18 @@ export default function App() {
             <div className="space-y-2">
               <p className="text-xs text-zinc-300">Tambahkan / update file (mendukung multi upload)</p>
               <input value={folderPrefix} onChange={(e) => setFolderPrefix(e.target.value)} placeholder="Folder tujuan (opsional), contoh: src/components" className="input-modern text-xs" />
-              <button onClick={() => updateInputRef.current?.click()} className="btn-modern w-full text-xs py-2"><Upload size={14} /> Pilih file update</button>
+              {repoFolders.length > 0 && (
+                <select value={folderPrefix} onChange={(e) => setFolderPrefix(e.target.value)} className="input-modern text-xs">
+                  <option value="">Root repository</option>
+                  {repoFolders.map((folder) => <option key={folder} value={folder}>{folder}</option>)}
+                </select>
+              )}
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={() => updateInputRef.current?.click()} className="btn-modern w-full text-xs py-2"><Upload size={14} /> Pilih file</button>
+                <button onClick={() => updateFolderInputRef.current?.click()} className="btn-modern w-full text-xs py-2"><FileArchive size={14} /> Pilih folder</button>
+              </div>
               <input ref={updateInputRef} type="file" multiple className="hidden" onChange={handleStageFiles} />
+              <input ref={updateFolderInputRef} type="file" multiple className="hidden" onChange={handleStageFiles} {...({ webkitdirectory: 'true', directory: 'true' } as any)} />
               <div className="max-h-44 overflow-y-auto pr-1 space-y-1.5">
                 {stagedFiles.map((file) => (
                   <div key={file.id} className="text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5 flex items-start gap-2">
