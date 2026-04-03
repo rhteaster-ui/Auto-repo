@@ -9,11 +9,15 @@ import {
   BarChart3,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Copy,
   ExternalLink,
   FileArchive,
   FileCode2,
   FileJson,
+  FileText,
+  FolderOpen,
   Github,
   Home,
   Info,
@@ -48,6 +52,14 @@ type RepoFileEntry = {
   path: string;
   sha: string;
   size: number;
+};
+
+type RepoTreeNode = {
+  name: string;
+  path: string;
+  type: 'file' | 'folder';
+  size?: number;
+  children?: RepoTreeNode[];
 };
 
 type StagedFile = {
@@ -103,6 +115,53 @@ const formatActionLabel = (action: ActivityLog['action']) => {
   return 'Repo dihapus';
 };
 
+const buildRepoTree = (files: RepoFileEntry[]) => {
+  const root: RepoTreeNode[] = [];
+  const folderMap = new Map<string, RepoTreeNode>();
+
+  const ensureFolder = (path: string, name: string, parentPath: string) => {
+    if (folderMap.has(path)) return folderMap.get(path)!;
+    const node: RepoTreeNode = { name, path, type: 'folder', children: [] };
+    folderMap.set(path, node);
+    if (!parentPath) {
+      root.push(node);
+    } else {
+      const parent = folderMap.get(parentPath);
+      parent?.children?.push(node);
+    }
+    return node;
+  };
+
+  files.forEach((file) => {
+    const parts = file.path.split('/');
+    let currentPath = '';
+    let parentPath = '';
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i];
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      const isLast = i === parts.length - 1;
+      if (isLast) {
+        const fileNode: RepoTreeNode = { name: part, path: file.path, type: 'file', size: file.size };
+        if (!parentPath) root.push(fileNode);
+        else folderMap.get(parentPath)?.children?.push(fileNode);
+      } else {
+        ensureFolder(currentPath, part, parentPath);
+        parentPath = currentPath;
+      }
+    }
+  });
+
+  const sortNodes = (nodes: RepoTreeNode[]) => {
+    nodes.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    nodes.forEach((node) => node.children && sortNodes(node.children));
+  };
+  sortNodes(root);
+  return root;
+};
+
 const toBase64 = async (file: File) => {
   const buff = new Uint8Array(await file.arrayBuffer());
   let binary = '';
@@ -140,6 +199,10 @@ export default function App() {
   const [folderPrefix, setFolderPrefix] = useState('');
   const [syncingRepo, setSyncingRepo] = useState(false);
   const [savingRepo, setSavingRepo] = useState(false);
+  const [expandedFolders, setExpandedFolders] = useState<string[]>([]);
+  const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
+  const [activeFileContent, setActiveFileContent] = useState('');
+  const [activeFileLoading, setActiveFileLoading] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -190,6 +253,7 @@ export default function App() {
     });
     return [...folders].sort((a, b) => a.localeCompare(b));
   }, [repoFiles]);
+  const repoTree = useMemo(() => buildRepoTree(repoFiles), [repoFiles]);
 
   const loadUserData = async () => {
     const savedTokens = await db.tokens.toArray();
@@ -412,6 +476,11 @@ export default function App() {
       setBaseShas(Object.fromEntries(snapshot.files.map((f) => [f.path, f.sha])));
       setDeletedPaths([]);
       setStagedFiles([]);
+      setExpandedFolders([]);
+      if (activeFilePath && !snapshot.files.find((item) => item.path === activeFilePath)) {
+        setActiveFilePath(null);
+        setActiveFileContent('');
+      }
       await upsertProjectMeta(target, { lastSyncedAt: Date.now(), totalFiles: snapshot.files.length });
       if (!opts?.silent) {
         await addLog({ repoName: target.repoName, owner: target.owner, action: 'sync_repo', detail: `Sinkronisasi ${snapshot.files.length} file.` });
@@ -432,7 +501,38 @@ export default function App() {
       syncSelectedRepo(selectedProject, { silent: true });
     }, 15000);
     return () => window.clearInterval(intervalId);
-  }, [tab, selectedProject, user]);
+  }, [tab, selectedProject?.id, user?.username]);
+
+  const toggleFolder = (path: string) => {
+    setExpandedFolders((prev) => (prev.includes(path) ? prev.filter((p) => p !== path) : [...prev, path]));
+  };
+
+  const loadFileContent = async (path: string) => {
+    if (!selectedProject || !user) return;
+    try {
+      setActiveFilePath(path);
+      setActiveFileLoading(true);
+      setError(null);
+      const octokit = new Octokit({ auth: user.token });
+      const { data } = await octokit.repos.getContent({
+        owner: selectedProject.owner,
+        repo: selectedProject.repoName,
+        path,
+      });
+
+      if (!('content' in data) || !data.content) {
+        setActiveFileContent('File tidak dapat ditampilkan (mungkin binary atau kosong).');
+        return;
+      }
+      const normalized = data.content.replace(/\n/g, '');
+      const decoded = atob(normalized);
+      setActiveFileContent(decoded);
+    } catch {
+      setActiveFileContent('Gagal membaca isi file ini.');
+    } finally {
+      setActiveFileLoading(false);
+    }
+  };
 
   const handleStageFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files?.length) return;
@@ -556,6 +656,42 @@ export default function App() {
     setHasStarted(true);
     localStorage.setItem('repoflow_started', 'true');
   };
+
+  const renderRepoTreeNodes = (nodes: RepoTreeNode[], level = 0): React.ReactNode => nodes.map((node) => {
+    if (node.type === 'folder') {
+      const opened = expandedFolders.includes(node.path);
+      return (
+        <div key={node.path}>
+          <button
+            type="button"
+            onClick={() => toggleFolder(node.path)}
+            className="w-full text-left text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5 flex items-center gap-1.5"
+            style={{ paddingLeft: `${8 + level * 14}px` }}
+          >
+            {opened ? <ChevronDown size={12} className="text-zinc-400" /> : <ChevronRight size={12} className="text-zinc-400" />}
+            <FolderOpen size={12} className="text-brand-light" />
+            <span className="text-zinc-200">{node.name}</span>
+          </button>
+          {opened && node.children && <div className="mt-1 space-y-1">{renderRepoTreeNodes(node.children, level + 1)}</div>}
+        </div>
+      );
+    }
+
+    return (
+      <label
+        key={node.path}
+        className={`text-xs rounded-lg px-2 py-1.5 border flex items-start gap-2 ${activeFilePath === node.path ? 'border-brand/45 bg-brand/10' : 'bg-white/[0.03] border-white/5'}`}
+        style={{ paddingLeft: `${8 + level * 14}px` }}
+      >
+        <input type="checkbox" checked={deletedPaths.includes(node.path)} onChange={() => toggleDeletePath(node.path)} className="mt-0.5" />
+        <button type="button" onClick={() => loadFileContent(node.path)} className="flex items-start gap-1.5 flex-1 text-left">
+          <FileText size={12} className="text-zinc-500 mt-0.5 shrink-0" />
+          <span className="break-all text-zinc-300 flex-1">{node.name}</span>
+        </button>
+        <span className="text-[10px] text-zinc-500">{bytesToReadable(node.size || 0)}</span>
+      </label>
+    );
+  });
 
   const renderRepoCards = (limit?: number) => {
     const rows = typeof limit === 'number' ? filteredProjects.slice(0, limit) : filteredProjects;
@@ -710,16 +846,22 @@ export default function App() {
 
           <div className="grid md:grid-cols-2 gap-3">
             <div className="space-y-2">
-              <p className="text-xs text-zinc-300">File di repo (root + nested folder)</p>
+              <p className="text-xs text-zinc-300">Struktur file repo (klik file untuk lihat isi, centang untuk hapus)</p>
               <div className="max-h-56 overflow-y-auto pr-1 space-y-1.5">
                 {repoFiles.length === 0 && <p className="text-[11px] text-zinc-500">Belum ada file (atau sedang sinkronisasi).</p>}
-                {repoFiles.map((file) => (
-                  <label key={file.path} className="text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5 flex items-start gap-2">
-                    <input type="checkbox" checked={deletedPaths.includes(file.path)} onChange={() => toggleDeletePath(file.path)} className="mt-0.5" />
-                    <span className="break-all text-zinc-300 flex-1">{file.path}</span>
-                    <span className="text-[10px] text-zinc-500 ml-auto">{bytesToReadable(file.size)}</span>
-                  </label>
-                ))}
+                {renderRepoTreeNodes(repoTree)}
+              </div>
+              <div className="rounded-xl border border-white/10 bg-black/20 p-2.5">
+                <p className="text-[11px] text-zinc-400 mb-1">Isi file terpilih</p>
+                {!activeFilePath && <p className="text-xs text-zinc-500">Belum ada file dipilih.</p>}
+                {activeFilePath && (
+                  <div className="space-y-2">
+                    <p className="text-[11px] text-zinc-300 break-all">{activeFilePath}</p>
+                    <pre className="text-[11px] text-zinc-200 bg-zinc-950/70 border border-white/10 rounded-lg p-2 max-h-44 overflow-auto whitespace-pre-wrap break-words">
+                      {activeFileLoading ? 'Memuat isi file...' : activeFileContent || 'File kosong.'}
+                    </pre>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -784,6 +926,16 @@ const renderInfo = () => (
             <p className="text-xs text-white font-semibold">Rahmat / rAi Engine</p>
             <p className="text-[11px] text-zinc-500">Maintainer & developer RepoFlow.</p>
           </div>
+        </div>
+      </section>
+
+      <section className="app-card p-3.5 space-y-2">
+        <h3 className="text-sm font-semibold text-white">Teknologi yang Dipakai</h3>
+        <div className="grid md:grid-cols-2 gap-2 text-xs text-zinc-300">
+          <div className="rounded-lg border border-white/10 bg-white/[0.02] px-2.5 py-2">Bahasa: TypeScript, JavaScript, HTML, CSS.</div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.02] px-2.5 py-2">Frontend: React + Vite + Tailwind style utilities.</div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.02] px-2.5 py-2">Integrasi GitHub: Octokit REST API.</div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.02] px-2.5 py-2">Database lokal: IndexedDB (Dexie) untuk token, metadata, history.</div>
         </div>
       </section>
 
