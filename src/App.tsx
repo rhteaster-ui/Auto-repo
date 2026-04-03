@@ -14,11 +14,14 @@ import {
   ExternalLink,
   FileArchive,
   FileCode2,
+  FileJson,
+  FolderTree,
   Github,
   Home,
   Info,
   Key,
   Loader2,
+  Plus,
   Rocket,
   Search,
   ShieldCheck,
@@ -29,9 +32,28 @@ import {
 import { AnimatePresence, motion } from 'motion/react';
 import JSZip from 'jszip';
 import { Octokit } from '@octokit/rest';
-import { db, type GitHubToken, type Project } from './lib/db';
+import { db, type GitHubToken, type Project, type RepoHistory } from './lib/db';
 
 type AppTab = 'dashboard' | 'upload' | 'tools' | 'info';
+type RepoFileAction = 'keep' | 'delete';
+
+type StagedFile = {
+  id: string;
+  path: string;
+  size: number;
+  include: boolean;
+  source: 'zip' | 'file' | 'folder';
+  contentBase64: string;
+};
+
+type RepoFile = {
+  path: string;
+  sha: string;
+  size: number;
+  action: RepoFileAction;
+};
+
+const WEB_ICON = 'https://res.cloudinary.com/dwiozm4vz/image/upload/v1775203338/nalaxl1mo6eltckuzpoh.png';
 
 const NAV_ITEMS: { id: AppTab; label: string; icon: React.ReactNode }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: <Home size={16} /> },
@@ -52,7 +74,7 @@ const getRecentActivity = (projects: Project[]) => {
     const dayEnd = new Date(date);
     dayEnd.setHours(23, 59, 59, 999);
 
-    const count = projects.filter((project) => project.createdAt >= dayStart.getTime() && project.createdAt <= dayEnd.getTime()).length;
+    const count = projects.filter((project) => (project.updatedAt ?? project.createdAt) >= dayStart.getTime() && (project.updatedAt ?? project.createdAt) <= dayEnd.getTime()).length;
 
     return {
       label: labels[date.getDay()],
@@ -61,12 +83,30 @@ const getRecentActivity = (projects: Project[]) => {
   });
 };
 
+const bytesToReadable = (value: number) => {
+  if (!value) return '0 B';
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(Math.floor(Math.log(value) / Math.log(1024)), sizes.length - 1);
+  return `${(value / (1024 ** i)).toFixed(i === 0 ? 0 : 2)} ${sizes[i]}`;
+};
+
+const toBase64 = async (file: File) => {
+  const fileData = new Uint8Array(await file.arrayBuffer());
+  const binary = Array.from(fileData, (byte) => String.fromCharCode(byte)).join('');
+  return btoa(binary);
+};
+
 export default function App() {
   const [token, setToken] = useState('');
   const [user, setUser] = useState<GitHubToken | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [history, setHistory] = useState<RepoHistory[]>([]);
   const [repoName, setRepoName] = useState('');
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
+  const [repoFiles, setRepoFiles] = useState<RepoFile[]>([]);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [extractProgress, setExtractProgress] = useState(0);
+  const [isRepoLoading, setIsRepoLoading] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
   const [status, setStatus] = useState('');
   const [progress, setProgress] = useState(0);
@@ -80,15 +120,18 @@ export default function App() {
   const [hasStarted, setHasStarted] = useState(localStorage.getItem('repoflow_started') === 'true');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadUserData();
     loadProjects();
+    loadHistory();
   }, []);
 
   useEffect(() => {
     if (!user || !repoName.trim()) {
       setRepoCheckStatus('idle');
+      setRepoFiles([]);
       return;
     }
 
@@ -102,10 +145,16 @@ export default function App() {
         if (err?.status === 404) setRepoCheckStatus('available');
         else setRepoCheckStatus('idle');
       }
-    }, 500);
+    }, 450);
 
     return () => clearTimeout(timeoutId);
   }, [repoName, user]);
+
+  useEffect(() => {
+    if (repoCheckStatus === 'exists' && user && repoName.trim()) {
+      loadRepoFiles(repoName.trim());
+    }
+  }, [repoCheckStatus, repoName, user]);
 
   const filteredProjects = useMemo(
     () => projects.filter((project) => project.repoName.toLowerCase().includes(searchProject.toLowerCase())),
@@ -115,6 +164,9 @@ export default function App() {
   const activityData = useMemo(() => getRecentActivity(projects), [projects]);
   const totalWeekActivity = activityData.reduce((acc, curr) => acc + curr.count, 0);
   const maxActivity = Math.max(1, ...activityData.map((item) => item.count));
+  const selectedStagedFiles = stagedFiles.filter((entry) => entry.include);
+  const selectedTotalSize = selectedStagedFiles.reduce((sum, entry) => sum + entry.size, 0);
+  const deletedRepoFiles = repoFiles.filter((item) => item.action === 'delete');
 
   const loadUserData = async () => {
     const savedTokens = await db.tokens.toArray();
@@ -126,8 +178,14 @@ export default function App() {
   };
 
   const loadProjects = async () => {
-    const savedProjects = await db.projects.orderBy('createdAt').reverse().toArray();
-    setProjects(savedProjects);
+    const savedProjects = await db.projects.toArray();
+    const sorted = savedProjects.sort((a, b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt));
+    setProjects(sorted);
+  };
+
+  const loadHistory = async () => {
+    const rows = await db.history.orderBy('timestamp').reverse().limit(10).toArray();
+    setHistory(rows);
   };
 
   const validateToken = async (inputToken: string) => {
@@ -163,22 +221,138 @@ export default function App() {
     setUser(null);
     setToken('');
     setRepoCheckStatus('idle');
+    setRepoFiles([]);
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const upsertStagedFiles = (incoming: StagedFile[]) => {
+    setStagedFiles((prev) => {
+      const map = new Map<string, StagedFile>(prev.map((item) => [item.path, item]));
+      incoming.forEach((item) => map.set(item.path, item));
+      return [...map.values()].sort((a, b) => a.path.localeCompare(b.path));
+    });
+  };
 
-    const isZip = file.name.toLowerCase().endsWith('.zip');
-    const isHtml = file.name.toLowerCase().endsWith('.html');
+  const parseZipFile = async (zipFile: File) => {
+    const zip = new JSZip();
+    const content = await zip.loadAsync(zipFile);
+    const paths = Object.keys(content.files).filter((path) => !content.files[path].dir);
 
-    if (!isZip && !isHtml) {
-      setError('File harus format .zip atau .html.');
-      return;
+    const extracted: StagedFile[] = [];
+    for (let i = 0; i < paths.length; i += 1) {
+      const path = paths[i];
+      const entry = content.files[path];
+      const base64 = await entry.async('base64');
+      const uint8 = await entry.async('uint8array');
+      extracted.push({
+        id: `zip-${zipFile.name}-${path}`,
+        path,
+        size: uint8.byteLength,
+        include: true,
+        source: 'zip',
+        contentBase64: base64,
+      });
+      setExtractProgress(Math.round(((i + 1) / paths.length) * 100));
     }
 
-    setUploadFile(file);
-    setError(null);
+    return extracted;
+  };
+
+  const handleInputFiles = async (fileList: FileList | null, source: 'file' | 'folder') => {
+    if (!fileList || fileList.length === 0) return;
+
+    try {
+      setError(null);
+      setIsExtracting(true);
+      setExtractProgress(4);
+      setStatus('Memproses file...');
+
+      const files = Array.from(fileList);
+      const parsed: StagedFile[] = [];
+
+      for (let i = 0; i < files.length; i += 1) {
+        const file = files[i];
+        if (file.name.toLowerCase().endsWith('.zip')) {
+          setStatus(`Ekstrak ZIP: ${file.name}`);
+          const zipRows = await parseZipFile(file);
+          parsed.push(...zipRows);
+        } else {
+          const path = file.webkitRelativePath || file.name;
+          parsed.push({
+            id: `${source}-${path}-${file.lastModified}`,
+            path,
+            size: file.size,
+            include: true,
+            source,
+            contentBase64: await toBase64(file),
+          });
+        }
+      }
+
+      upsertStagedFiles(parsed);
+      setStatus(`File siap diupdate: ${parsed.length} file baru diproses.`);
+      setExtractProgress(100);
+    } catch (err) {
+      setError('Gagal memproses file. Pastikan ZIP valid atau file tidak rusak.');
+      console.error(err);
+    } finally {
+      setTimeout(() => {
+        setIsExtracting(false);
+        setExtractProgress(0);
+      }, 400);
+    }
+  };
+
+  const removeStagedFile = (id: string) => {
+    setStagedFiles((prev) => prev.filter((item) => item.id !== id));
+  };
+
+  const toggleStagedFile = (id: string) => {
+    setStagedFiles((prev) => prev.map((item) => (item.id === id ? { ...item, include: !item.include } : item)));
+  };
+
+  const toggleRepoDelete = (path: string) => {
+    setRepoFiles((prev) => prev.map((item) => (item.path === path ? { ...item, action: item.action === 'keep' ? 'delete' : 'keep' } : item)));
+  };
+
+  const loadRepoFiles = async (repo: string) => {
+    if (!user) return;
+
+    try {
+      setIsRepoLoading(true);
+      const octokit = new Octokit({ auth: user.token });
+      const { data: repoData } = await octokit.repos.get({ owner: user.username, repo });
+      const { data: branchData } = await octokit.repos.getBranch({ owner: user.username, repo, branch: repoData.default_branch });
+      const { data: treeData } = await octokit.git.getTree({ owner: user.username, repo, tree_sha: branchData.commit.sha, recursive: 'true' });
+
+      const rows: RepoFile[] = (treeData.tree || [])
+        .filter((item) => item.type === 'blob' && Boolean(item.path) && Boolean(item.sha))
+        .map((item) => ({
+          path: item.path as string,
+          sha: item.sha as string,
+          size: item.size ?? 0,
+          action: 'keep' as const,
+        }))
+        .sort((a, b) => a.path.localeCompare(b.path));
+
+      setRepoFiles(rows);
+    } catch (err: any) {
+      setError(`Gagal baca isi repository: ${err?.message || 'unknown error'}`);
+      setRepoFiles([]);
+    } finally {
+      setIsRepoLoading(false);
+    }
+  };
+
+  const addHistory = async (action: RepoHistory['action'], repo: string, note: string) => {
+    if (!user) return;
+    await db.history.add({
+      action,
+      owner: user.username,
+      repoName: repo,
+      note,
+      timestamp: Date.now(),
+    });
+    await loadHistory();
   };
 
   const copyToClipboard = (text: string, id: number) => {
@@ -188,79 +362,95 @@ export default function App() {
   };
 
   const deployRepo = async () => {
-    if (!user || !uploadFile || !repoName.trim()) {
-      setError('Lengkapi nama repository dan file upload dulu.');
+    if (!user || !repoName.trim()) {
+      setError('Isi nama repository terlebih dahulu.');
       return;
     }
 
-    if (repoCheckStatus === 'exists') {
-      setError('Nama repository sudah dipakai. Gunakan nama lain.');
+    if (selectedStagedFiles.length === 0 && deletedRepoFiles.length === 0) {
+      setError('Tidak ada perubahan. Tambah file atau tandai file repo untuk dihapus.');
       return;
     }
 
     setIsDeploying(true);
     setError(null);
     setProgress(8);
-    setStatus('Membuat repository...');
+    setStatus('Menyiapkan push...');
 
     try {
       const octokit = new Octokit({ auth: user.token });
       const finalRepo = repoName.trim();
+      let repoUrl = `https://github.com/${user.username}/${finalRepo}`;
+      let repoExists = repoCheckStatus === 'exists';
 
-      const { data: repo } = await octokit.repos.createForAuthenticatedUser({
-        name: finalRepo,
-        auto_init: false,
-      });
-      setProgress(28);
+      if (!repoExists) {
+        const { data: repo } = await octokit.repos.createForAuthenticatedUser({
+          name: finalRepo,
+          auto_init: false,
+        });
+        repoUrl = repo.html_url;
+        repoExists = true;
+      }
 
-      if (uploadFile.name.toLowerCase().endsWith('.zip')) {
-        setStatus('Membaca ZIP & upload file...');
-        const zip = new JSZip();
-        const content = await zip.loadAsync(uploadFile);
-        const files = Object.keys(content.files).filter((path) => !content.files[path].dir);
+      if (repoExists && repoFiles.length === 0) {
+        await loadRepoFiles(finalRepo);
+      }
 
-        for (let i = 0; i < files.length; i += 1) {
-          const filePath = files[i];
-          const fileContent = await content.files[filePath].async('base64');
-          await octokit.repos.createOrUpdateFileContents({
-            owner: user.username,
-            repo: finalRepo,
-            path: filePath,
-            message: `Initial commit: ${filePath}`,
-            content: fileContent,
-          });
-          setProgress(28 + ((i + 1) / files.length) * 62);
-          setStatus(`Mengunggah ${i + 1}/${files.length}`);
-        }
-      } else {
-        setStatus('Upload file HTML...');
-        const htmlContent = await uploadFile.text();
+      const repoFileMap = new Map<string, RepoFile>(repoFiles.map((file) => [file.path, file]));
+      const totalOps = selectedStagedFiles.length + deletedRepoFiles.length;
+      let doneOps = 0;
+
+      for (const file of deletedRepoFiles) {
+        setStatus(`Menghapus ${file.path}`);
+        await octokit.repos.deleteFile({
+          owner: user.username,
+          repo: finalRepo,
+          path: file.path,
+          message: `Delete: ${file.path}`,
+          sha: file.sha,
+        });
+        doneOps += 1;
+        setProgress(15 + (doneOps / Math.max(1, totalOps)) * 82);
+      }
+
+      for (const file of selectedStagedFiles) {
+        setStatus(`Memperbarui ${file.path}`);
+        const existing = repoFileMap.get(file.path);
         await octokit.repos.createOrUpdateFileContents({
           owner: user.username,
           repo: finalRepo,
-          path: 'index.html',
-          message: 'Initial commit: index.html',
-          content: btoa(unescape(encodeURIComponent(htmlContent))),
+          path: file.path,
+          message: `${existing ? 'Update' : 'Add'}: ${file.path}`,
+          content: file.contentBase64,
+          sha: existing?.sha,
         });
-        setProgress(92);
+        doneOps += 1;
+        setProgress(15 + (doneOps / Math.max(1, totalOps)) * 82);
       }
 
-      const newProject: Project = {
+      const now = Date.now();
+      const savedProjects = await db.projects.toArray();
+      const current = savedProjects.find((item) => item.repoName === finalRepo && item.owner === user.username);
+      const nextProject: Project = {
+        id: current?.id,
         repoName: finalRepo,
         owner: user.username,
-        url: repo.html_url,
-        createdAt: Date.now(),
+        url: current?.url ?? repoUrl,
+        createdAt: current?.createdAt ?? now,
+        updatedAt: now,
+        fileCount: Math.max(0, repoFiles.length - deletedRepoFiles.length + selectedStagedFiles.length),
+        lastAction: current ? 'updated' : 'created',
       };
 
-      await db.projects.add(newProject);
+      await db.projects.put(nextProject);
+      await addHistory(current ? 'updated' : 'created', finalRepo, `+${selectedStagedFiles.length} file, -${deletedRepoFiles.length} file`);
       await loadProjects();
 
       setProgress(100);
-      setStatus('Selesai.');
-      setSuccess(`Deploy ${finalRepo} berhasil.`);
-      setRepoName('');
-      setUploadFile(null);
-      setRepoCheckStatus('idle');
+      setStatus('Selesai. Perubahan sudah dipush ke GitHub.');
+      setSuccess(`Update ${finalRepo} berhasil.`);
+      setStagedFiles([]);
+      await loadRepoFiles(finalRepo);
 
       setTimeout(() => {
         setIsDeploying(false);
@@ -269,7 +459,7 @@ export default function App() {
         setProgress(0);
       }, 2000);
     } catch (err: any) {
-      setError(`Deploy gagal: ${err?.message || 'Terjadi kesalahan.'}`);
+      setError(`Push gagal: ${err?.message || 'Terjadi kesalahan.'}`);
       setIsDeploying(false);
     }
   };
@@ -282,6 +472,7 @@ export default function App() {
       const octokit = new Octokit({ auth: user.token });
       await octokit.repos.delete({ owner: project.owner, repo: project.repoName });
       if (project.id) await db.projects.delete(project.id);
+      await addHistory('deleted', project.repoName, 'Repository dihapus dari GitHub');
       await loadProjects();
       setSuccess('Repository berhasil dihapus.');
       setTimeout(() => setSuccess(null), 2000);
@@ -299,9 +490,42 @@ export default function App() {
     localStorage.setItem('repoflow_started', 'true');
   };
 
+  const renderRepoCards = (limit?: number) => {
+    const rows = typeof limit === 'number' ? filteredProjects.slice(0, limit) : filteredProjects;
+
+    if (rows.length === 0) {
+      return (
+        <div className="app-card p-6 text-center">
+          <p className="text-xs text-zinc-500">Belum ada repository.</p>
+        </div>
+      );
+    }
+
+    return rows.map((project) => (
+      <div key={project.id} className="app-card p-3 flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-sm text-white font-semibold truncate">{project.repoName}</p>
+          <p className="text-[11px] text-zinc-500">Ditambah: {new Date(project.createdAt).toLocaleString('id-ID')}</p>
+          <p className="text-[11px] text-zinc-500">Update: {new Date(project.updatedAt ?? project.createdAt).toLocaleString('id-ID')}</p>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button onClick={() => project.id && copyToClipboard(project.url, project.id)} className="icon-btn" title="Salin URL">
+            {copiedId === project.id ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
+          </button>
+          <a href={project.url} target="_blank" className="icon-btn" title="Buka GitHub" rel="noreferrer">
+            <ExternalLink size={14} />
+          </a>
+          <button onClick={() => deleteProject(project)} className="icon-btn hover:text-red-400" title="Hapus repo">
+            <Trash2 size={14} />
+          </button>
+        </div>
+      </div>
+    ));
+  };
+
   const renderDashboard = () => (
     <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
         <div className="app-card p-3">
           <p className="text-[11px] text-zinc-500">Total Repo</p>
           <p className="text-xl font-bold text-white mt-1">{projects.length}</p>
@@ -310,11 +534,19 @@ export default function App() {
           <p className="text-[11px] text-zinc-500">Aktivitas 7 Hari</p>
           <p className="text-xl font-bold text-white mt-1">{totalWeekActivity}</p>
         </div>
+        <div className="app-card p-3">
+          <p className="text-[11px] text-zinc-500">File Di-stage</p>
+          <p className="text-xl font-bold text-white mt-1">{selectedStagedFiles.length}</p>
+        </div>
+        <div className="app-card p-3">
+          <p className="text-[11px] text-zinc-500">Ukuran Upload</p>
+          <p className="text-base font-bold text-white mt-1">{bytesToReadable(selectedTotalSize)}</p>
+        </div>
       </div>
 
       <div className="app-card p-3.5">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-white">Grafik Aktivitas Deploy</h3>
+          <h3 className="text-sm font-semibold text-white">Grafik Aktivitas Push</h3>
           <BarChart3 size={14} className="text-brand" />
         </div>
         <div className="flex items-end gap-2 h-28">
@@ -332,11 +564,32 @@ export default function App() {
         </div>
       </div>
 
-      <div className="app-card p-3.5">
-        <h3 className="text-sm font-semibold text-white mb-2">Selamat datang di aplikasi</h3>
-        <p className="text-xs text-zinc-400 leading-relaxed">
-          Gunakan tab Upload untuk deploy ZIP/HTML, tab Tools untuk kelola repo, dan tab Info Web untuk melihat profil developer serta link komunitas.
-        </p>
+      <div className="app-card p-3.5 space-y-2">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-white">Riwayat Perubahan Repo</h3>
+          <FolderTree size={14} className="text-brand-light" />
+        </div>
+        <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
+          {history.length === 0 ? (
+            <p className="text-xs text-zinc-500">Belum ada history.</p>
+          ) : (
+            history.map((item) => (
+              <div key={item.id} className="rounded-lg border border-white/10 bg-white/[0.02] px-2.5 py-2">
+                <p className="text-xs text-white">{item.repoName} • {item.action.toUpperCase()}</p>
+                <p className="text-[11px] text-zinc-400 break-words">{item.note}</p>
+                <p className="text-[10px] text-zinc-500">{new Date(item.timestamp).toLocaleString('id-ID')}</p>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      <div className="app-card p-3.5 space-y-2">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-white">Repository Terbaru</h3>
+          <button onClick={() => setTab('tools')} className="text-xs text-brand-light">Kelola di Tools</button>
+        </div>
+        <div className="space-y-2">{renderRepoCards(3)}</div>
       </div>
     </div>
   );
@@ -383,7 +636,7 @@ export default function App() {
             {hasGithubAccount === 'no' && (
               <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30">
                 <p className="text-xs text-amber-100">Silakan daftar akun GitHub terlebih dahulu.</p>
-                <a href="https://github.com/signup" target="_blank" className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-amber-100">
+                <a href="https://github.com/signup" target="_blank" className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-amber-100" rel="noreferrer">
                   <UserRoundPlus size={13} /> Daftar GitHub <ExternalLink size={13} />
                 </a>
               </div>
@@ -405,6 +658,7 @@ export default function App() {
                   href="https://github.com/settings/tokens/new?scopes=repo,delete_repo&description=RepoFlow_App"
                   target="_blank"
                   className="inline-flex items-center gap-2 text-xs text-zinc-400"
+                  rel="noreferrer"
                 >
                   <ShieldCheck size={13} /> Buat token di GitHub
                 </a>
@@ -422,7 +676,7 @@ export default function App() {
       </section>
 
       <section className="app-card p-3.5 space-y-3">
-        <h3 className="text-sm font-semibold text-white">Upload ZIP / HTML</h3>
+        <h3 className="text-sm font-semibold text-white">Kontrol File Repository (tambah / hapus / update)</h3>
         <input
           type="text"
           value={repoName}
@@ -432,40 +686,89 @@ export default function App() {
         />
 
         {repoCheckStatus === 'checking' && <p className="text-[11px] text-zinc-500">Memeriksa nama repo...</p>}
-        {repoCheckStatus === 'available' && <p className="text-[11px] text-green-400">Nama repo tersedia.</p>}
-        {repoCheckStatus === 'exists' && <p className="text-[11px] text-red-400">Nama repo sudah dipakai.</p>}
+        {repoCheckStatus === 'available' && <p className="text-[11px] text-green-400">Repo baru akan dibuat.</p>}
+        {repoCheckStatus === 'exists' && <p className="text-[11px] text-amber-300">Repo sudah ada. Anda sedang mode update isi repo.</p>}
 
-        <div
-          onClick={() => !isDeploying && fileInputRef.current?.click()}
-          className={`rounded-xl border border-dashed p-4 text-center ${uploadFile ? 'border-brand/40 bg-brand/[0.05]' : 'border-white/12 bg-white/[0.02]'}`}
-        >
-          <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept=".zip,.html" />
-          {uploadFile ? (
-            <div className="space-y-1.5">
-              {uploadFile.name.toLowerCase().endsWith('.zip') ? <FileArchive size={18} className="mx-auto text-brand-light" /> : <FileCode2 size={18} className="mx-auto text-brand-light" />}
-              <p className="text-xs text-white break-all">{uploadFile.name}</p>
-              <p className="text-[11px] text-zinc-500">{(uploadFile.size / 1024 / 1024).toFixed(2)} MB</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          <button onClick={() => fileInputRef.current?.click()} className="btn-modern text-sm py-2.5">
+            <Plus size={15} /> Tambah Banyak File
+          </button>
+          <button onClick={() => folderInputRef.current?.click()} className="btn-modern text-sm py-2.5">
+            <FolderTree size={15} /> Tambah Folder
+          </button>
+        </div>
+
+        <input type="file" ref={fileInputRef} onChange={(e) => handleInputFiles(e.target.files, 'file')} className="hidden" multiple />
+        <input type="file" ref={folderInputRef} onChange={(e) => handleInputFiles(e.target.files, 'folder')} className="hidden" multiple webkitdirectory="true" />
+
+        {isExtracting && (
+          <div className="space-y-1.5">
+            <p className="text-xs text-zinc-300 flex items-start gap-1.5 break-words"><Loader2 size={14} className="animate-spin mt-[1px] shrink-0" /> <span className="break-all">{status || 'Ekstrak file...'}</span></p>
+            <div className="h-2 rounded-full bg-white/[0.05] overflow-hidden">
+              <motion.div className="h-full bg-gradient-to-r from-brand to-brand-light" initial={{ width: 0 }} animate={{ width: `${extractProgress}%` }} />
             </div>
-          ) : (
-            <div className="space-y-1.5">
-              <Upload size={18} className="mx-auto text-zinc-500" />
-              <p className="text-xs text-zinc-300">Pilih file .zip atau .html</p>
-            </div>
-          )}
+          </div>
+        )}
+
+        <div className="rounded-xl border border-white/10 bg-black/20 p-2.5 space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-zinc-300">File yang akan diupload/update ({selectedStagedFiles.length}/{stagedFiles.length})</p>
+            <p className="text-[11px] text-zinc-500">{bytesToReadable(selectedTotalSize)}</p>
+          </div>
+          <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1">
+            {stagedFiles.length === 0 ? (
+              <p className="text-xs text-zinc-500">Belum ada file tambahan.</p>
+            ) : (
+              stagedFiles.map((entry) => (
+                <div key={entry.id} className="flex items-center gap-2 text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5">
+                  <input type="checkbox" checked={entry.include} onChange={() => toggleStagedFile(entry.id)} />
+                  <FileJson size={13} className="text-zinc-500 shrink-0" />
+                  <span className="text-zinc-300 break-all" title={entry.path}>{entry.path}</span>
+                  <span className="text-[10px] text-zinc-500 ml-auto shrink-0">{bytesToReadable(entry.size)}</span>
+                  <button onClick={() => removeStagedFile(entry.id)} className="icon-btn" title="Hapus dari staging">
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-white/10 bg-black/20 p-2.5 space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-zinc-300">File existing di repo (root & nested folder)</p>
+            {isRepoLoading && <Loader2 size={13} className="animate-spin text-zinc-500" />}
+          </div>
+          <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1">
+            {repoFiles.length === 0 ? (
+              <p className="text-xs text-zinc-500">Belum ada file existing atau repo belum dimuat.</p>
+            ) : (
+              repoFiles.map((entry) => (
+                <div key={entry.path} className={`flex items-center gap-2 text-xs rounded-lg px-2 py-1.5 border ${entry.action === 'delete' ? 'bg-red-500/10 border-red-500/25' : 'bg-white/[0.03] border-white/5'}`}>
+                  <FileCode2 size={13} className="text-zinc-500 shrink-0" />
+                  <span className="text-zinc-300 break-all" title={entry.path}>{entry.path}</span>
+                  <span className="text-[10px] text-zinc-500 ml-auto shrink-0">{bytesToReadable(entry.size)}</span>
+                  <button onClick={() => toggleRepoDelete(entry.path)} className="icon-btn" title="Toggle hapus">
+                    {entry.action === 'delete' ? <Check size={13} className="text-green-400" /> : <Trash2 size={13} className="text-red-400" />}
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
         </div>
 
         <button
           onClick={deployRepo}
-          disabled={isDeploying || !user || !uploadFile || !repoName || repoCheckStatus === 'exists'}
+          disabled={isDeploying || !user || !repoName || (selectedStagedFiles.length === 0 && deletedRepoFiles.length === 0)}
           className="btn-modern w-full text-sm py-2.5"
         >
-          {isDeploying ? <><Loader2 size={15} className="animate-spin" /> {status}</> : <><Rocket size={15} /> Deploy Sekarang</>}
+          {isDeploying ? <><Loader2 size={15} className="animate-spin" /> {status}</> : <><Rocket size={15} /> Push Pembaruan ke GitHub</>}
         </button>
 
         {isDeploying && (
           <div className="space-y-1.5">
             <div className="flex justify-between text-[11px] text-zinc-500">
-              <span>Progress</span>
+              <span>Progress Push</span>
               <span>{Math.round(progress)}%</span>
             </div>
             <div className="h-2 rounded-full bg-white/[0.05] overflow-hidden">
@@ -493,77 +796,20 @@ export default function App() {
         </div>
       </section>
 
-      <section className="space-y-2">
-        {filteredProjects.length > 0 ? (
-          filteredProjects.map((project) => (
-            <div key={project.id} className="app-card p-3 flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <p className="text-sm text-white font-semibold truncate">{project.repoName}</p>
-                <p className="text-[11px] text-zinc-500">{new Date(project.createdAt).toLocaleDateString('id-ID')}</p>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <button onClick={() => project.id && copyToClipboard(project.url, project.id)} className="icon-btn" title="Salin URL">
-                  {copiedId === project.id ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
-                </button>
-                <a href={project.url} target="_blank" className="icon-btn" title="Buka GitHub">
-                  <ExternalLink size={14} />
-                </a>
-                <button onClick={() => deleteProject(project)} className="icon-btn hover:text-red-400" title="Hapus repo">
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            </div>
-          ))
-        ) : (
-          <div className="app-card p-6 text-center">
-            <p className="text-xs text-zinc-500">Belum ada repository.</p>
-          </div>
-        )}
-      </section>
+      <section className="space-y-2">{renderRepoCards()}</section>
     </div>
   );
 
   const renderInfo = () => (
     <div className="space-y-3">
       <section className="app-card p-3.5 space-y-2">
-        <h3 className="text-sm font-semibold text-white">Tentang Website</h3>
+        <div className="flex items-center gap-2">
+          <img src={WEB_ICON} alt="RepoFlow icon" className="w-8 h-8 rounded-lg border border-white/15" referrerPolicy="no-referrer" />
+          <h3 className="text-sm font-semibold text-white">Tentang Website</h3>
+        </div>
         <p className="text-xs text-zinc-400 leading-relaxed">
-          RepoFlow adalah web app untuk mempercepat deploy proyek dengan upload ZIP/HTML langsung ke GitHub. Fokus utama: cepat, ringan, dan nyaman di HP.
+          RepoFlow mendukung kontrol file lebih lengkap: baca isi repo existing, tambah file massal/folder, dan hapus file root atau nested folder sebelum push.
         </p>
-      </section>
-
-      <section className="app-card p-3.5 space-y-2">
-        <h3 className="text-sm font-semibold text-white">Tentang Developer</h3>
-        <div className="flex items-center gap-2.5">
-          <img
-            src="https://res.cloudinary.com/dwiozm4vz/image/upload/v1772959730/ootglrvfmykn6xsto7rq.png"
-            alt="R_hmt ofc"
-            className="w-10 h-10 rounded-xl border border-white/10"
-            referrerPolicy="no-referrer"
-          />
-          <div>
-            <p className="text-sm font-semibold text-white">R_hmt ofc</p>
-            <p className="text-[11px] text-zinc-500">Lead Developer & AI Architect</p>
-          </div>
-        </div>
-      </section>
-
-      <section className="app-card p-3.5 space-y-2">
-        <h3 className="text-sm font-semibold text-white">Komunitas & Sosial Media</h3>
-        <div className="grid grid-cols-1 gap-2">
-          <a href="https://whatsapp.com/channel/0029VbBjyjlJ93wa6hwSWa0p" target="_blank" className="link-item">
-            Join Saluran WhatsApp <ExternalLink size={13} />
-          </a>
-          <a href="https://www.instagram.com/rahmt_nhw?igsh=MWQwcnB3bTA2ZnVidg==" target="_blank" className="link-item">
-            Instagram Developer <ExternalLink size={13} />
-          </a>
-          <a href="https://www.tiktok.com/@r_hmtofc?_r=1&_t=ZS-94KRfWQjeUu" target="_blank" className="link-item">
-            TikTok Developer <ExternalLink size={13} />
-          </a>
-          <a href="https://t.me/rAi_engine" target="_blank" className="link-item">
-            Telegram Channel <ExternalLink size={13} />
-          </a>
-        </div>
       </section>
     </div>
   );
@@ -572,12 +818,10 @@ export default function App() {
     return (
       <div className="min-h-screen px-4 py-8 flex items-center justify-center">
         <div className="w-full max-w-md app-card p-5 space-y-4 text-center">
-          <div className="w-12 h-12 rounded-2xl bg-brand/20 flex items-center justify-center mx-auto">
-            <Code2 size={20} className="text-brand-light" />
-          </div>
+          <img src={WEB_ICON} alt="RepoFlow logo" className="w-12 h-12 rounded-2xl mx-auto border border-white/15" referrerPolicy="no-referrer" />
           <h1 className="text-xl font-bold text-white">Selamat Datang di RepoFlow</h1>
           <p className="text-xs text-zinc-400 leading-relaxed">
-            Aplikasi deploy modern gaya native untuk upload ZIP/HTML ke GitHub, memantau aktivitas, dan mengelola repository Anda dari HP dengan nyaman.
+            Aplikasi push project modern untuk update repository GitHub dari desktop dan mobile, tanpa perlu deploy hosting.
           </p>
           <button onClick={startApp} className="btn-modern w-full text-sm py-2.5">
             Lanjutkan ke Aplikasi
@@ -588,17 +832,20 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen pb-[86px]">
+    <div className="min-h-screen pb-[86px] md:pb-0">
       <header className="sticky top-0 z-40 border-b border-white/10 bg-bg-dark/90 backdrop-blur-xl px-4 py-3">
-        <div className="max-w-xl mx-auto flex items-center justify-between">
-          <div>
-            <p className="text-xs text-zinc-500">RepoFlow App</p>
-            <h1 className="text-sm text-white font-semibold">
-              {tab === 'dashboard' && 'Dashboard'}
-              {tab === 'upload' && 'Upload & Deploy'}
-              {tab === 'tools' && 'Tools Repository'}
-              {tab === 'info' && 'Info Website'}
-            </h1>
+        <div className="max-w-6xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <img src={WEB_ICON} alt="RepoFlow logo" className="w-8 h-8 rounded-lg border border-white/15" referrerPolicy="no-referrer" />
+            <div>
+              <p className="text-xs text-zinc-500">RepoFlow App</p>
+              <h1 className="text-sm text-white font-semibold">
+                {tab === 'dashboard' && 'Dashboard'}
+                {tab === 'upload' && 'Upload & Kontrol File'}
+                {tab === 'tools' && 'Tools Repository'}
+                {tab === 'info' && 'Info Website'}
+              </h1>
+            </div>
           </div>
           {user ? (
             <div className="flex items-center gap-2">
@@ -611,32 +858,47 @@ export default function App() {
         </div>
       </header>
 
-      <main className="px-3 py-3">
-        <div className="max-w-xl mx-auto">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={tab}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.18 }}
-            >
-              {(error || success) && (
-                <div className={`mb-3 p-2.5 rounded-xl text-xs flex items-center gap-2 border ${error ? 'bg-red-500/10 border-red-500/20 text-red-300' : 'bg-green-500/10 border-green-500/20 text-green-300'}`}>
-                  {error ? <AlertCircle size={15} /> : <CheckCircle2 size={15} />} {error || success}
-                </div>
-              )}
+      <main className="px-3 py-3 md:px-6">
+        <div className="max-w-6xl mx-auto md:grid md:grid-cols-[220px_1fr] md:gap-4">
+          <aside className="hidden md:block app-card p-2 h-fit sticky top-[86px]">
+            {NAV_ITEMS.map((item) => (
+              <button
+                key={item.id}
+                onClick={() => setTab(item.id)}
+                className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs mb-1 ${tab === item.id ? 'text-brand-light bg-brand/10' : 'text-zinc-400 hover:bg-white/[0.04]'}`}
+              >
+                {item.icon}
+                {item.label}
+              </button>
+            ))}
+          </aside>
 
-              {tab === 'dashboard' && renderDashboard()}
-              {tab === 'upload' && renderUpload()}
-              {tab === 'tools' && renderTools()}
-              {tab === 'info' && renderInfo()}
-            </motion.div>
-          </AnimatePresence>
+          <div>
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={tab}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.18 }}
+              >
+                {(error || success) && (
+                  <div className={`mb-3 p-2.5 rounded-xl text-xs flex items-center gap-2 border ${error ? 'bg-red-500/10 border-red-500/20 text-red-300' : 'bg-green-500/10 border-green-500/20 text-green-300'}`}>
+                    {error ? <AlertCircle size={15} /> : <CheckCircle2 size={15} />} {error || success}
+                  </div>
+                )}
+
+                {tab === 'dashboard' && renderDashboard()}
+                {tab === 'upload' && renderUpload()}
+                {tab === 'tools' && renderTools()}
+                {tab === 'info' && renderInfo()}
+              </motion.div>
+            </AnimatePresence>
+          </div>
         </div>
       </main>
 
-      <nav className="fixed bottom-0 left-0 right-0 border-t border-white/10 bg-zinc-950/95 backdrop-blur-xl z-50 pb-[calc(0.35rem+env(safe-area-inset-bottom))]">
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 border-t border-white/10 bg-zinc-950/95 backdrop-blur-xl z-50 pb-[calc(0.35rem+env(safe-area-inset-bottom))]">
         <div className="max-w-xl mx-auto grid grid-cols-4 gap-1 px-2 pt-1.5">
           {NAV_ITEMS.map((item) => (
             <button
