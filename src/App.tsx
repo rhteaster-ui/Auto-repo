@@ -14,6 +14,7 @@ import {
   ExternalLink,
   FileArchive,
   FileCode2,
+  FileJson,
   Github,
   Home,
   Info,
@@ -32,6 +33,16 @@ import { Octokit } from '@octokit/rest';
 import { db, type GitHubToken, type Project } from './lib/db';
 
 type AppTab = 'dashboard' | 'upload' | 'tools' | 'info';
+
+type UploadEntry = {
+  id: string;
+  path: string;
+  size: number;
+  source: 'zip' | 'single';
+  include: boolean;
+};
+
+const WEB_ICON = 'https://res.cloudinary.com/dwiozm4vz/image/upload/v1775203338/nalaxl1mo6eltckuzpoh.png';
 
 const NAV_ITEMS: { id: AppTab; label: string; icon: React.ReactNode }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: <Home size={16} /> },
@@ -61,12 +72,22 @@ const getRecentActivity = (projects: Project[]) => {
   });
 };
 
+const bytesToReadable = (value: number) => {
+  if (!value) return '0 B';
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(Math.floor(Math.log(value) / Math.log(1024)), sizes.length - 1);
+  return `${(value / (1024 ** i)).toFixed(i === 0 ? 0 : 2)} ${sizes[i]}`;
+};
+
 export default function App() {
   const [token, setToken] = useState('');
   const [user, setUser] = useState<GitHubToken | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [repoName, setRepoName] = useState('');
   const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadEntries, setUploadEntries] = useState<UploadEntry[]>([]);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [extractProgress, setExtractProgress] = useState(0);
   const [isDeploying, setIsDeploying] = useState(false);
   const [status, setStatus] = useState('');
   const [progress, setProgress] = useState(0);
@@ -102,7 +123,7 @@ export default function App() {
         if (err?.status === 404) setRepoCheckStatus('available');
         else setRepoCheckStatus('idle');
       }
-    }, 500);
+    }, 450);
 
     return () => clearTimeout(timeoutId);
   }, [repoName, user]);
@@ -115,6 +136,8 @@ export default function App() {
   const activityData = useMemo(() => getRecentActivity(projects), [projects]);
   const totalWeekActivity = activityData.reduce((acc, curr) => acc + curr.count, 0);
   const maxActivity = Math.max(1, ...activityData.map((item) => item.count));
+  const selectedEntries = uploadEntries.filter((entry) => entry.include);
+  const selectedTotalSize = selectedEntries.reduce((sum, entry) => sum + entry.size, 0);
 
   const loadUserData = async () => {
     const savedTokens = await db.tokens.toArray();
@@ -165,20 +188,65 @@ export default function App() {
     setRepoCheckStatus('idle');
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const extractEntries = async (file: File) => {
+    setIsExtracting(true);
+    setExtractProgress(6);
+    const fileName = file.name.toLowerCase();
+
+    if (fileName.endsWith('.zip')) {
+      const zip = new JSZip();
+      const content = await zip.loadAsync(file);
+      const entries = Object.keys(content.files)
+        .filter((path) => !content.files[path].dir)
+        .map((path) => ({
+          id: path,
+          path,
+          size: 0,
+          source: 'zip' as const,
+          include: true,
+        }));
+      setExtractProgress(100);
+      setUploadEntries(entries);
+      setStatus(`ZIP berhasil diekstrak: ${entries.length} file ditemukan.`);
+    } else {
+      setExtractProgress(100);
+      setUploadEntries([
+        {
+          id: file.name,
+          path: file.name,
+          size: file.size,
+          source: 'single',
+          include: true,
+        },
+      ]);
+      setStatus('File siap diunggah.');
+    }
+
+    setTimeout(() => {
+      setIsExtracting(false);
+      setExtractProgress(0);
+    }, 450);
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const isZip = file.name.toLowerCase().endsWith('.zip');
-    const isHtml = file.name.toLowerCase().endsWith('.html');
-
-    if (!isZip && !isHtml) {
-      setError('File harus format .zip atau .html.');
-      return;
+    try {
+      setUploadFile(file);
+      setError(null);
+      setStatus('Menganalisis file...');
+      await extractEntries(file);
+    } catch (err) {
+      setUploadFile(null);
+      setUploadEntries([]);
+      setError('File tidak bisa dibaca. Pastikan format ZIP valid atau file tidak rusak.');
+      console.error(err);
     }
+  };
 
-    setUploadFile(file);
-    setError(null);
+  const toggleUploadEntry = (id: string) => {
+    setUploadEntries((prev) => prev.map((item) => (item.id === id ? { ...item, include: !item.include } : item)));
   };
 
   const copyToClipboard = (text: string, id: number) => {
@@ -190,6 +258,11 @@ export default function App() {
   const deployRepo = async () => {
     if (!user || !uploadFile || !repoName.trim()) {
       setError('Lengkapi nama repository dan file upload dulu.');
+      return;
+    }
+
+    if (selectedEntries.length === 0) {
+      setError('Pilih minimal 1 file untuk dipush ke GitHub.');
       return;
     }
 
@@ -211,16 +284,15 @@ export default function App() {
         name: finalRepo,
         auto_init: false,
       });
-      setProgress(28);
+      setProgress(20);
 
       if (uploadFile.name.toLowerCase().endsWith('.zip')) {
-        setStatus('Membaca ZIP & upload file...');
+        setStatus('Mengunggah file hasil ekstrak...');
         const zip = new JSZip();
         const content = await zip.loadAsync(uploadFile);
-        const files = Object.keys(content.files).filter((path) => !content.files[path].dir);
 
-        for (let i = 0; i < files.length; i += 1) {
-          const filePath = files[i];
+        for (let i = 0; i < selectedEntries.length; i += 1) {
+          const filePath = selectedEntries[i].path;
           const fileContent = await content.files[filePath].async('base64');
           await octokit.repos.createOrUpdateFileContents({
             owner: user.username,
@@ -229,18 +301,18 @@ export default function App() {
             message: `Initial commit: ${filePath}`,
             content: fileContent,
           });
-          setProgress(28 + ((i + 1) / files.length) * 62);
-          setStatus(`Mengunggah ${i + 1}/${files.length}`);
+          setProgress(20 + ((i + 1) / selectedEntries.length) * 72);
+          setStatus(`Push ${i + 1}/${selectedEntries.length} file`);
         }
       } else {
-        setStatus('Upload file HTML...');
-        const htmlContent = await uploadFile.text();
+        const fileData = new Uint8Array(await uploadFile.arrayBuffer());
+        const binary = Array.from(fileData, (byte) => String.fromCharCode(byte)).join('');
         await octokit.repos.createOrUpdateFileContents({
           owner: user.username,
           repo: finalRepo,
-          path: 'index.html',
-          message: 'Initial commit: index.html',
-          content: btoa(unescape(encodeURIComponent(htmlContent))),
+          path: selectedEntries[0].path,
+          message: `Initial commit: ${selectedEntries[0].path}`,
+          content: btoa(binary),
         });
         setProgress(92);
       }
@@ -256,10 +328,11 @@ export default function App() {
       await loadProjects();
 
       setProgress(100);
-      setStatus('Selesai.');
-      setSuccess(`Deploy ${finalRepo} berhasil.`);
+      setStatus('Selesai. Semua file ter-push ke GitHub.');
+      setSuccess(`Push ${finalRepo} berhasil.`);
       setRepoName('');
       setUploadFile(null);
+      setUploadEntries([]);
       setRepoCheckStatus('idle');
 
       setTimeout(() => {
@@ -269,7 +342,7 @@ export default function App() {
         setProgress(0);
       }, 2000);
     } catch (err: any) {
-      setError(`Deploy gagal: ${err?.message || 'Terjadi kesalahan.'}`);
+      setError(`Push gagal: ${err?.message || 'Terjadi kesalahan.'}`);
       setIsDeploying(false);
     }
   };
@@ -299,9 +372,41 @@ export default function App() {
     localStorage.setItem('repoflow_started', 'true');
   };
 
+  const renderRepoCards = (limit?: number) => {
+    const rows = typeof limit === 'number' ? filteredProjects.slice(0, limit) : filteredProjects;
+
+    if (rows.length === 0) {
+      return (
+        <div className="app-card p-6 text-center">
+          <p className="text-xs text-zinc-500">Belum ada repository.</p>
+        </div>
+      );
+    }
+
+    return rows.map((project) => (
+      <div key={project.id} className="app-card p-3 flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-sm text-white font-semibold truncate">{project.repoName}</p>
+          <p className="text-[11px] text-zinc-500">{new Date(project.createdAt).toLocaleDateString('id-ID')}</p>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button onClick={() => project.id && copyToClipboard(project.url, project.id)} className="icon-btn" title="Salin URL">
+            {copiedId === project.id ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
+          </button>
+          <a href={project.url} target="_blank" className="icon-btn" title="Buka GitHub" rel="noreferrer">
+            <ExternalLink size={14} />
+          </a>
+          <button onClick={() => deleteProject(project)} className="icon-btn hover:text-red-400" title="Hapus repo">
+            <Trash2 size={14} />
+          </button>
+        </div>
+      </div>
+    ));
+  };
+
   const renderDashboard = () => (
     <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
         <div className="app-card p-3">
           <p className="text-[11px] text-zinc-500">Total Repo</p>
           <p className="text-xl font-bold text-white mt-1">{projects.length}</p>
@@ -310,11 +415,19 @@ export default function App() {
           <p className="text-[11px] text-zinc-500">Aktivitas 7 Hari</p>
           <p className="text-xl font-bold text-white mt-1">{totalWeekActivity}</p>
         </div>
+        <div className="app-card p-3">
+          <p className="text-[11px] text-zinc-500">File Dipilih</p>
+          <p className="text-xl font-bold text-white mt-1">{selectedEntries.length}</p>
+        </div>
+        <div className="app-card p-3">
+          <p className="text-[11px] text-zinc-500">Ukuran Upload</p>
+          <p className="text-base font-bold text-white mt-1">{bytesToReadable(selectedTotalSize)}</p>
+        </div>
       </div>
 
       <div className="app-card p-3.5">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-white">Grafik Aktivitas Deploy</h3>
+          <h3 className="text-sm font-semibold text-white">Grafik Aktivitas Push</h3>
           <BarChart3 size={14} className="text-brand" />
         </div>
         <div className="flex items-end gap-2 h-28">
@@ -332,11 +445,12 @@ export default function App() {
         </div>
       </div>
 
-      <div className="app-card p-3.5">
-        <h3 className="text-sm font-semibold text-white mb-2">Selamat datang di aplikasi</h3>
-        <p className="text-xs text-zinc-400 leading-relaxed">
-          Gunakan tab Upload untuk deploy ZIP/HTML, tab Tools untuk kelola repo, dan tab Info Web untuk melihat profil developer serta link komunitas.
-        </p>
+      <div className="app-card p-3.5 space-y-2">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-white">Repository Terbaru</h3>
+          <button onClick={() => setTab('tools')} className="text-xs text-brand-light">Kelola di Tools</button>
+        </div>
+        <div className="space-y-2">{renderRepoCards(3)}</div>
       </div>
     </div>
   );
@@ -383,7 +497,7 @@ export default function App() {
             {hasGithubAccount === 'no' && (
               <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30">
                 <p className="text-xs text-amber-100">Silakan daftar akun GitHub terlebih dahulu.</p>
-                <a href="https://github.com/signup" target="_blank" className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-amber-100">
+                <a href="https://github.com/signup" target="_blank" className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-amber-100" rel="noreferrer">
                   <UserRoundPlus size={13} /> Daftar GitHub <ExternalLink size={13} />
                 </a>
               </div>
@@ -405,6 +519,7 @@ export default function App() {
                   href="https://github.com/settings/tokens/new?scopes=repo,delete_repo&description=RepoFlow_App"
                   target="_blank"
                   className="inline-flex items-center gap-2 text-xs text-zinc-400"
+                  rel="noreferrer"
                 >
                   <ShieldCheck size={13} /> Buat token di GitHub
                 </a>
@@ -422,7 +537,7 @@ export default function App() {
       </section>
 
       <section className="app-card p-3.5 space-y-3">
-        <h3 className="text-sm font-semibold text-white">Upload ZIP / HTML</h3>
+        <h3 className="text-sm font-semibold text-white">Upload Semua Jenis File (ZIP / source code / binary)</h3>
         <input
           type="text"
           value={repoName}
@@ -439,33 +554,68 @@ export default function App() {
           onClick={() => !isDeploying && fileInputRef.current?.click()}
           className={`rounded-xl border border-dashed p-4 text-center ${uploadFile ? 'border-brand/40 bg-brand/[0.05]' : 'border-white/12 bg-white/[0.02]'}`}
         >
-          <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept=".zip,.html" />
+          <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" />
           {uploadFile ? (
             <div className="space-y-1.5">
               {uploadFile.name.toLowerCase().endsWith('.zip') ? <FileArchive size={18} className="mx-auto text-brand-light" /> : <FileCode2 size={18} className="mx-auto text-brand-light" />}
               <p className="text-xs text-white break-all">{uploadFile.name}</p>
-              <p className="text-[11px] text-zinc-500">{(uploadFile.size / 1024 / 1024).toFixed(2)} MB</p>
+              <p className="text-[11px] text-zinc-500">{bytesToReadable(uploadFile.size)}</p>
             </div>
           ) : (
             <div className="space-y-1.5">
               <Upload size={18} className="mx-auto text-zinc-500" />
-              <p className="text-xs text-zinc-300">Pilih file .zip atau .html</p>
+              <p className="text-xs text-zinc-300">Pilih ZIP atau file apa pun (.py, .java, .ts, .cpp, .json, dll)</p>
             </div>
           )}
         </div>
 
+        {isExtracting && (
+          <div className="space-y-1.5">
+            <p className="text-xs text-zinc-300 flex items-center gap-1.5"><Loader2 size={14} className="animate-spin" /> Ekstrak & analisis file...</p>
+            <div className="h-2 rounded-full bg-white/[0.05] overflow-hidden">
+              <motion.div className="h-full bg-gradient-to-r from-brand to-brand-light" initial={{ width: 0 }} animate={{ width: `${extractProgress}%` }} />
+            </div>
+          </div>
+        )}
+
+        <AnimatePresence>
+          {uploadEntries.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="rounded-xl border border-white/10 bg-black/20 p-2.5"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs text-zinc-300">Preview hasil ekstrak ({selectedEntries.length}/{uploadEntries.length} file dipilih)</p>
+                <p className="text-[11px] text-zinc-500">{bytesToReadable(selectedTotalSize)}</p>
+              </div>
+              <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1">
+                {uploadEntries.map((entry) => (
+                  <label key={entry.id} className="flex items-center gap-2 text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5">
+                    <input type="checkbox" checked={entry.include} onChange={() => toggleUploadEntry(entry.id)} />
+                    <FileJson size={13} className="text-zinc-500 shrink-0" />
+                    <span className="text-zinc-300 truncate">{entry.path}</span>
+                    <span className="text-[10px] text-zinc-500 ml-auto shrink-0">{bytesToReadable(entry.size)}</span>
+                  </label>
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         <button
           onClick={deployRepo}
-          disabled={isDeploying || !user || !uploadFile || !repoName || repoCheckStatus === 'exists'}
+          disabled={isDeploying || !user || !uploadFile || !repoName || repoCheckStatus === 'exists' || selectedEntries.length === 0}
           className="btn-modern w-full text-sm py-2.5"
         >
-          {isDeploying ? <><Loader2 size={15} className="animate-spin" /> {status}</> : <><Rocket size={15} /> Deploy Sekarang</>}
+          {isDeploying ? <><Loader2 size={15} className="animate-spin" /> {status}</> : <><Rocket size={15} /> Push ke GitHub (bukan deploy)</>}
         </button>
 
         {isDeploying && (
           <div className="space-y-1.5">
             <div className="flex justify-between text-[11px] text-zinc-500">
-              <span>Progress</span>
+              <span>Progress Push</span>
               <span>{Math.round(progress)}%</span>
             </div>
             <div className="h-2 rounded-full bg-white/[0.05] overflow-hidden">
@@ -480,7 +630,7 @@ export default function App() {
   const renderTools = () => (
     <div className="space-y-3">
       <section className="app-card p-3.5 space-y-2.5">
-        <h3 className="text-sm font-semibold text-white">Kelola Repository</h3>
+        <h3 className="text-sm font-semibold text-white">Kelola Repository (edit, hapus, buka)</h3>
         <div className="relative">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
           <input
@@ -493,42 +643,19 @@ export default function App() {
         </div>
       </section>
 
-      <section className="space-y-2">
-        {filteredProjects.length > 0 ? (
-          filteredProjects.map((project) => (
-            <div key={project.id} className="app-card p-3 flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <p className="text-sm text-white font-semibold truncate">{project.repoName}</p>
-                <p className="text-[11px] text-zinc-500">{new Date(project.createdAt).toLocaleDateString('id-ID')}</p>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <button onClick={() => project.id && copyToClipboard(project.url, project.id)} className="icon-btn" title="Salin URL">
-                  {copiedId === project.id ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
-                </button>
-                <a href={project.url} target="_blank" className="icon-btn" title="Buka GitHub">
-                  <ExternalLink size={14} />
-                </a>
-                <button onClick={() => deleteProject(project)} className="icon-btn hover:text-red-400" title="Hapus repo">
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            </div>
-          ))
-        ) : (
-          <div className="app-card p-6 text-center">
-            <p className="text-xs text-zinc-500">Belum ada repository.</p>
-          </div>
-        )}
-      </section>
+      <section className="space-y-2">{renderRepoCards()}</section>
     </div>
   );
 
   const renderInfo = () => (
     <div className="space-y-3">
       <section className="app-card p-3.5 space-y-2">
-        <h3 className="text-sm font-semibold text-white">Tentang Website</h3>
+        <div className="flex items-center gap-2">
+          <img src={WEB_ICON} alt="RepoFlow icon" className="w-8 h-8 rounded-lg border border-white/15" referrerPolicy="no-referrer" />
+          <h3 className="text-sm font-semibold text-white">Tentang Website</h3>
+        </div>
         <p className="text-xs text-zinc-400 leading-relaxed">
-          RepoFlow adalah web app untuk mempercepat deploy proyek dengan upload ZIP/HTML langsung ke GitHub. Fokus utama: cepat, ringan, dan nyaman di HP.
+          RepoFlow sekarang sudah responsif untuk PC + mobile, punya preview ekstrak ZIP sebelum push Git, dan mendukung upload semua jenis file pemrograman.
         </p>
       </section>
 
@@ -551,16 +678,16 @@ export default function App() {
       <section className="app-card p-3.5 space-y-2">
         <h3 className="text-sm font-semibold text-white">Komunitas & Sosial Media</h3>
         <div className="grid grid-cols-1 gap-2">
-          <a href="https://whatsapp.com/channel/0029VbBjyjlJ93wa6hwSWa0p" target="_blank" className="link-item">
+          <a href="https://whatsapp.com/channel/0029VbBjyjlJ93wa6hwSWa0p" target="_blank" className="link-item" rel="noreferrer">
             Join Saluran WhatsApp <ExternalLink size={13} />
           </a>
-          <a href="https://www.instagram.com/rahmt_nhw?igsh=MWQwcnB3bTA2ZnVidg==" target="_blank" className="link-item">
+          <a href="https://www.instagram.com/rahmt_nhw?igsh=MWQwcnB3bTA2ZnVidg==" target="_blank" className="link-item" rel="noreferrer">
             Instagram Developer <ExternalLink size={13} />
           </a>
-          <a href="https://www.tiktok.com/@r_hmtofc?_r=1&_t=ZS-94KRfWQjeUu" target="_blank" className="link-item">
+          <a href="https://www.tiktok.com/@r_hmtofc?_r=1&_t=ZS-94KRfWQjeUu" target="_blank" className="link-item" rel="noreferrer">
             TikTok Developer <ExternalLink size={13} />
           </a>
-          <a href="https://t.me/rAi_engine" target="_blank" className="link-item">
+          <a href="https://t.me/rAi_engine" target="_blank" className="link-item" rel="noreferrer">
             Telegram Channel <ExternalLink size={13} />
           </a>
         </div>
@@ -572,12 +699,10 @@ export default function App() {
     return (
       <div className="min-h-screen px-4 py-8 flex items-center justify-center">
         <div className="w-full max-w-md app-card p-5 space-y-4 text-center">
-          <div className="w-12 h-12 rounded-2xl bg-brand/20 flex items-center justify-center mx-auto">
-            <Code2 size={20} className="text-brand-light" />
-          </div>
+          <img src={WEB_ICON} alt="RepoFlow logo" className="w-12 h-12 rounded-2xl mx-auto border border-white/15" referrerPolicy="no-referrer" />
           <h1 className="text-xl font-bold text-white">Selamat Datang di RepoFlow</h1>
           <p className="text-xs text-zinc-400 leading-relaxed">
-            Aplikasi deploy modern gaya native untuk upload ZIP/HTML ke GitHub, memantau aktivitas, dan mengelola repository Anda dari HP dengan nyaman.
+            Aplikasi push project modern untuk upload ZIP/semua file ke GitHub, memantau aktivitas, dan mengelola repository dari HP maupun desktop.
           </p>
           <button onClick={startApp} className="btn-modern w-full text-sm py-2.5">
             Lanjutkan ke Aplikasi
@@ -588,17 +713,20 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen pb-[86px]">
+    <div className="min-h-screen pb-[86px] md:pb-0">
       <header className="sticky top-0 z-40 border-b border-white/10 bg-bg-dark/90 backdrop-blur-xl px-4 py-3">
-        <div className="max-w-xl mx-auto flex items-center justify-between">
-          <div>
-            <p className="text-xs text-zinc-500">RepoFlow App</p>
-            <h1 className="text-sm text-white font-semibold">
-              {tab === 'dashboard' && 'Dashboard'}
-              {tab === 'upload' && 'Upload & Deploy'}
-              {tab === 'tools' && 'Tools Repository'}
-              {tab === 'info' && 'Info Website'}
-            </h1>
+        <div className="max-w-6xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <img src={WEB_ICON} alt="RepoFlow logo" className="w-8 h-8 rounded-lg border border-white/15" referrerPolicy="no-referrer" />
+            <div>
+              <p className="text-xs text-zinc-500">RepoFlow App</p>
+              <h1 className="text-sm text-white font-semibold">
+                {tab === 'dashboard' && 'Dashboard'}
+                {tab === 'upload' && 'Upload & Push Git'}
+                {tab === 'tools' && 'Tools Repository'}
+                {tab === 'info' && 'Info Website'}
+              </h1>
+            </div>
           </div>
           {user ? (
             <div className="flex items-center gap-2">
@@ -611,32 +739,47 @@ export default function App() {
         </div>
       </header>
 
-      <main className="px-3 py-3">
-        <div className="max-w-xl mx-auto">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={tab}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.18 }}
-            >
-              {(error || success) && (
-                <div className={`mb-3 p-2.5 rounded-xl text-xs flex items-center gap-2 border ${error ? 'bg-red-500/10 border-red-500/20 text-red-300' : 'bg-green-500/10 border-green-500/20 text-green-300'}`}>
-                  {error ? <AlertCircle size={15} /> : <CheckCircle2 size={15} />} {error || success}
-                </div>
-              )}
+      <main className="px-3 py-3 md:px-6">
+        <div className="max-w-6xl mx-auto md:grid md:grid-cols-[220px_1fr] md:gap-4">
+          <aside className="hidden md:block app-card p-2 h-fit sticky top-[86px]">
+            {NAV_ITEMS.map((item) => (
+              <button
+                key={item.id}
+                onClick={() => setTab(item.id)}
+                className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs mb-1 ${tab === item.id ? 'text-brand-light bg-brand/10' : 'text-zinc-400 hover:bg-white/[0.04]'}`}
+              >
+                {item.icon}
+                {item.label}
+              </button>
+            ))}
+          </aside>
 
-              {tab === 'dashboard' && renderDashboard()}
-              {tab === 'upload' && renderUpload()}
-              {tab === 'tools' && renderTools()}
-              {tab === 'info' && renderInfo()}
-            </motion.div>
-          </AnimatePresence>
+          <div>
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={tab}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.18 }}
+              >
+                {(error || success) && (
+                  <div className={`mb-3 p-2.5 rounded-xl text-xs flex items-center gap-2 border ${error ? 'bg-red-500/10 border-red-500/20 text-red-300' : 'bg-green-500/10 border-green-500/20 text-green-300'}`}>
+                    {error ? <AlertCircle size={15} /> : <CheckCircle2 size={15} />} {error || success}
+                  </div>
+                )}
+
+                {tab === 'dashboard' && renderDashboard()}
+                {tab === 'upload' && renderUpload()}
+                {tab === 'tools' && renderTools()}
+                {tab === 'info' && renderInfo()}
+              </motion.div>
+            </AnimatePresence>
+          </div>
         </div>
       </main>
 
-      <nav className="fixed bottom-0 left-0 right-0 border-t border-white/10 bg-zinc-950/95 backdrop-blur-xl z-50 pb-[calc(0.35rem+env(safe-area-inset-bottom))]">
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 border-t border-white/10 bg-zinc-950/95 backdrop-blur-xl z-50 pb-[calc(0.35rem+env(safe-area-inset-bottom))]">
         <div className="max-w-xl mx-auto grid grid-cols-4 gap-1 px-2 pt-1.5">
           {NAV_ITEMS.map((item) => (
             <button
