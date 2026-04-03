@@ -7,17 +7,21 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   BarChart3,
+  BookOpenCheck,
   Check,
   CheckCircle2,
+  Clock3,
   Copy,
   ExternalLink,
   FileArchive,
   FileCode2,
   FileJson,
+  FolderTree,
   Github,
   Home,
   Info,
   Key,
+  Link2,
   Loader2,
   RefreshCcw,
   Rocket,
@@ -58,6 +62,13 @@ type StagedFile = {
 };
 
 const WEB_ICON = 'https://res.cloudinary.com/dwiozm4vz/image/upload/v1775203338/nalaxl1mo6eltckuzpoh.png';
+const DEV_PROFILE = 'https://res.cloudinary.com/dwiozm4vz/image/upload/v1772959730/ootglrvfmykn6xsto7rq.png';
+const SOCIAL_LINKS = [
+  { label: 'WhatsApp Channel', url: 'https://whatsapp.com/channel/0029VbBjyjlJ93wa6hwSWa0p' },
+  { label: 'Instagram Dev', url: 'https://www.instagram.com/rahmt_nhw?igsh=MWQwcnB3bTA2ZnVidg==' },
+  { label: 'TikTok Dev', url: 'https://www.tiktok.com/@r_hmtofc?_r=1&_t=ZS-94KRfWQjeUu' },
+  { label: 'Telegram Dev', url: 'https://t.me/rAi_engine' },
+];
 
 const NAV_ITEMS: { id: AppTab; label: string; icon: React.ReactNode }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: <Home size={16} /> },
@@ -120,9 +131,11 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
   const [repoFiles, setRepoFiles] = useState<RepoFileEntry[]>([]);
   const [baseShas, setBaseShas] = useState<Record<string, string>>({});
+  const [baseHeadSha, setBaseHeadSha] = useState('');
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
   const [deletedPaths, setDeletedPaths] = useState<string[]>([]);
   const [folderPrefix, setFolderPrefix] = useState('');
+  const [uploadFilter, setUploadFilter] = useState('');
   const [syncingRepo, setSyncingRepo] = useState(false);
   const [savingRepo, setSavingRepo] = useState(false);
 
@@ -165,6 +178,10 @@ export default function App() {
   const totalWeekActivity = activityData.reduce((acc, curr) => acc + curr.count, 0);
   const maxActivity = Math.max(1, ...activityData.map((item) => item.count));
   const selectedEntries = uploadEntries.filter((entry) => entry.include);
+  const filteredUploadEntries = useMemo(
+    () => uploadEntries.filter((entry) => entry.path.toLowerCase().includes(uploadFilter.toLowerCase())),
+    [uploadEntries, uploadFilter],
+  );
   const selectedTotalSize = selectedEntries.reduce((sum, entry) => sum + entry.size, 0);
   const selectedProject = projects.find((p) => p.id === selectedProjectId) || null;
   const repoFolders = useMemo(() => {
@@ -395,6 +412,7 @@ export default function App() {
       const snapshot = await getSnapshot(target);
       setRepoFiles(snapshot.files);
       setBaseShas(Object.fromEntries(snapshot.files.map((f) => [f.path, f.sha])));
+      setBaseHeadSha(snapshot.headSha);
       setDeletedPaths([]);
       setStagedFiles([]);
       await upsertProjectMeta(target, { lastSyncedAt: Date.now(), totalFiles: snapshot.files.length });
@@ -458,6 +476,10 @@ export default function App() {
       setError(null);
       const latest = await getSnapshot(selectedProject);
       const latestMap = Object.fromEntries(latest.files.map((f) => [f.path, f.sha]));
+      if (baseHeadSha && latest.headSha !== baseHeadSha) {
+        setError('Repo berubah di GitHub utama setelah sync terakhir. Klik sinkronkan ulang agar tidak bentrok.');
+        return;
+      }
 
       const conflicts = [...deletedPaths, ...stagedFiles.map((f) => f.path)].filter((path) => {
         const base = baseShas[path];
@@ -639,16 +661,22 @@ export default function App() {
         <AnimatePresence>
           {uploadEntries.length > 0 && (
             <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="rounded-xl border border-white/10 bg-black/20 p-2.5">
-              <div className="flex items-center justify-between mb-2"><p className="text-xs text-zinc-300">Preview ekstrak ({selectedEntries.length}/{uploadEntries.length})</p><p className="text-[11px] text-zinc-500">{bytesToReadable(selectedTotalSize)}</p></div>
+              <div className="flex items-center justify-between mb-2 gap-2"><p className="text-xs text-zinc-300">Preview ekstrak ({selectedEntries.length}/{uploadEntries.length})</p><p className="text-[11px] text-zinc-500">{bytesToReadable(selectedTotalSize)}</p></div>
+              <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_auto] gap-2 mb-2">
+                <input value={uploadFilter} onChange={(e) => setUploadFilter(e.target.value)} placeholder="Cari file panjang / nested folder..." className="input-modern text-xs py-2" />
+                <button onClick={() => setUploadEntries((prev) => prev.map((item) => ({ ...item, include: true })))} className="btn-modern text-xs py-2">Pilih semua</button>
+                <button onClick={() => setUploadEntries((prev) => prev.map((item) => ({ ...item, include: false })))} className="btn-modern text-xs py-2">Lepas semua</button>
+              </div>
               <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
-                {uploadEntries.map((entry) => (
+                {filteredUploadEntries.map((entry) => (
                   <label key={entry.id} className="flex items-start gap-2 text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5">
                     <input type="checkbox" checked={entry.include} onChange={() => toggleUploadEntry(entry.id)} className="mt-0.5" />
                     <FileJson size={13} className="text-zinc-500 shrink-0 mt-0.5" />
-                    <span className="text-zinc-300 break-all max-w-[72%]" title={entry.path}>{entry.path}</span>
+                    <span className="text-zinc-300 break-all flex-1 whitespace-normal" title={entry.path}>{entry.path}</span>
                     <span className="text-[10px] text-zinc-500 ml-auto shrink-0">{bytesToReadable(entry.size)}</span>
                   </label>
                 ))}
+                {filteredUploadEntries.length === 0 && <p className="text-xs text-zinc-500">Tidak ada file yang cocok filter.</p>}
               </div>
             </motion.div>
           )}
@@ -665,6 +693,11 @@ export default function App() {
     <div className="space-y-3">
       <section className="app-card p-3.5 space-y-2.5">
         <h3 className="text-sm font-semibold text-white">Control Repository (real-time sync, tambah/hapus file)</h3>
+        <div className="grid gap-2 md:grid-cols-3">
+          <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2.5 text-xs text-zinc-300"><BookOpenCheck size={14} className="mb-1 text-brand-light" />1) Pilih repo dari daftar.</div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2.5 text-xs text-zinc-300"><RefreshCcw size={14} className="mb-1 text-brand-light" />2) Sinkronkan agar data sama dengan GitHub utama.</div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2.5 text-xs text-zinc-300"><Save size={14} className="mb-1 text-brand-light" />3) Pilih file untuk hapus/tambah lalu simpan.</div>
+        </div>
         <div className="relative"><Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" /><input type="text" value={searchProject} onChange={(e) => setSearchProject(e.target.value)} placeholder="Cari repository" className="input-modern pl-9 text-sm" /></div>
       </section>
       <section className="space-y-2">{renderRepoCards()}</section>
@@ -681,7 +714,7 @@ export default function App() {
 
           <div className="grid md:grid-cols-2 gap-3">
             <div className="space-y-2">
-              <p className="text-xs text-zinc-300">File di repo (root + nested folder)</p>
+              <p className="text-xs text-zinc-300 flex items-center gap-1.5"><FolderTree size={13} /> File di repo (root + nested folder)</p>
               <div className="max-h-56 overflow-y-auto pr-1 space-y-1.5">
                 {repoFiles.map((file) => (
                   <label key={file.path} className="text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5 flex items-start gap-2">
@@ -730,7 +763,36 @@ export default function App() {
 
   const renderInfo = () => (
     <div className="space-y-3">
-      <section className="app-card p-3.5 space-y-2"><div className="flex items-center gap-2"><img src={WEB_ICON} alt="RepoFlow icon" className="w-8 h-8 rounded-lg border border-white/15" referrerPolicy="no-referrer" /><h3 className="text-sm font-semibold text-white">Tentang Website</h3></div><p className="text-xs text-zinc-400 leading-relaxed">RepoFlow sekarang mendukung kontrol update/hapus file repo secara real-time, multi-file upload, preview ZIP lebih rapi, dan histori aktivitas.</p></section>
+      <section className="app-card p-3.5 space-y-2">
+        <div className="flex items-center gap-2">
+          <img src={WEB_ICON} alt="RepoFlow icon" className="w-8 h-8 rounded-lg border border-white/15" referrerPolicy="no-referrer" />
+          <h3 className="text-sm font-semibold text-white">Tentang Website</h3>
+        </div>
+        <p className="text-xs text-zinc-400 leading-relaxed">
+          RepoFlow adalah web untuk kontrol repository GitHub dengan fokus pembaruan file (hapus/tambah) secara aman, multi-file upload, dan sinkronisasi supaya perubahan dari GitHub utama tidak ketimpa.
+        </p>
+        <div className="grid md:grid-cols-2 gap-2">
+          <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2.5 text-xs text-zinc-300"><Clock3 size={13} className="inline mr-1 text-brand-light" />Data waktu simpan: dibuat, diubah, terakhir sinkron.</div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2.5 text-xs text-zinc-300"><FolderTree size={13} className="inline mr-1 text-brand-light" />Mendukung file root dan file di dalam folder untuk update.</div>
+        </div>
+      </section>
+      <section className="app-card p-3.5 space-y-2">
+        <div className="flex items-center gap-2">
+          <img src={DEV_PROFILE} alt="Developer profile" className="w-10 h-10 rounded-full border border-white/15 object-cover" referrerPolicy="no-referrer" />
+          <div>
+            <p className="text-sm text-white font-semibold">Info Developer</p>
+            <p className="text-[11px] text-zinc-500">Rahmat / rAi Engine</p>
+          </div>
+        </div>
+        <div className="space-y-1.5">
+          {SOCIAL_LINKS.map((item) => (
+            <a key={item.url} href={item.url} target="_blank" rel="noreferrer" className="link-item">
+              <span>{item.label}</span>
+              <span className="inline-flex items-center gap-1 text-zinc-400"><Link2 size={12} /> Buka <ExternalLink size={12} /></span>
+            </a>
+          ))}
+        </div>
+      </section>
     </div>
   );
 
