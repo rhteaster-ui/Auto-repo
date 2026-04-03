@@ -8,6 +8,8 @@ import {
   AlertCircle,
   BarChart3,
   BookOpenCheck,
+  ChevronLeft,
+  ChevronRight,
   Check,
   CheckCircle2,
   Clock3,
@@ -17,6 +19,8 @@ import {
   FileCode2,
   FileJson,
   FileText,
+  Folder,
+  FolderOpen,
   FolderTree,
   Github,
   Home,
@@ -44,7 +48,7 @@ type UploadEntry = {
   id: string;
   path: string;
   size: number;
-  source: 'zip' | 'single';
+  source: 'zip' | 'single' | 'archive';
   include: boolean;
   contentBase64: string;
 };
@@ -115,6 +119,15 @@ const toBase64 = async (file: File) => {
   return btoa(binary);
 };
 
+const ARCHIVE_EXTENSIONS = ['zip', 'rar', '7z', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'tar.gz'];
+
+const getArchiveExtension = (fileName: string) => {
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith('.tar.gz')) return 'tar.gz';
+  const ext = lower.split('.').pop() || '';
+  return ext;
+};
+
 export default function App() {
   const [token, setToken] = useState('');
   const [user, setUser] = useState<GitHubToken | null>(null);
@@ -157,6 +170,7 @@ export default function App() {
   const folderInputRef = useRef<HTMLInputElement>(null);
   const updateInputRef = useRef<HTMLInputElement>(null);
   const updateFolderInputRef = useRef<HTMLInputElement>(null);
+  const codePreviewRef = useRef<HTMLPreElement>(null);
 
   useEffect(() => {
     loadUserData();
@@ -278,9 +292,12 @@ export default function App() {
     if (node.type === 'folder') {
       return (
         <div key={node.path || node.name}>
-          <button type="button" className="w-full text-left text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5 flex items-center gap-2" onClick={() => toggleFolder(node.path)}>
-            <FolderTree size={12} className="text-brand-light" />
-            <span className="text-zinc-200" style={{ paddingLeft: `${depth * 12}px` }}>{node.name}</span>
+          <button type="button" className="w-full text-left text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5 flex items-center gap-1.5" onClick={() => toggleFolder(node.path)}>
+            <span className="text-zinc-500" style={{ paddingLeft: `${depth * 12}px` }}>
+              <ChevronRight size={12} className={`transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+            </span>
+            {isExpanded ? <FolderOpen size={12} className="text-brand-light" /> : <Folder size={12} className="text-brand-light" />}
+            <span className="text-zinc-200">{node.name}</span>
             <span className="ml-auto text-[10px] text-zinc-500">({node.children?.length || 0})</span>
           </button>
           {isExpanded && node.children && <div className="mt-1 space-y-1">{renderTreeNodes(node.children, depth + 1)}</div>}
@@ -367,7 +384,8 @@ export default function App() {
 
     for (let index = 0; index < list.length; index += 1) {
       const file = list[index];
-      if (file.name.toLowerCase().endsWith('.zip')) {
+      const archiveExt = getArchiveExtension(file.name);
+      if (archiveExt === 'zip') {
         const zip = await new JSZip().loadAsync(file);
         const paths = Object.keys(zip.files).filter((path) => !zip.files[path].dir);
         for (let i = 0; i < paths.length; i += 1) {
@@ -384,6 +402,15 @@ export default function App() {
             contentBase64,
           });
         }
+      } else if (ARCHIVE_EXTENSIONS.includes(archiveExt)) {
+        nextEntries.push({
+          id: `${file.name}:${crypto.randomUUID()}`,
+          path: file.webkitRelativePath || file.name,
+          size: file.size,
+          source: 'archive',
+          include: true,
+          contentBase64: await toBase64(file),
+        });
       } else {
         nextEntries.push({
           id: `${file.name}:${crypto.randomUUID()}`,
@@ -578,6 +605,11 @@ export default function App() {
     setStagedFiles((prev) => prev.filter((f) => f.path !== path));
   };
 
+  const scrollCodePreview = (delta: number) => {
+    if (!codePreviewRef.current) return;
+    codePreviewRef.current.scrollBy({ left: delta, behavior: 'smooth' });
+  };
+
   const applyRepoChanges = async () => {
     if (!selectedProject || !user) return;
     if (stagedFiles.length === 0 && deletedPaths.length === 0) {
@@ -754,7 +786,7 @@ export default function App() {
       </section>
 
       <section className="app-card p-3.5 space-y-3">
-        <h3 className="text-sm font-semibold text-white">Upload Multi-file / ZIP (dengan kontrol sebelum push)</h3>
+        <h3 className="text-sm font-semibold text-white">Upload Multi-file / ZIP / Archive (dengan kontrol sebelum push)</h3>
         <input type="text" value={repoName} onChange={(e) => setRepoName(e.target.value.replace(/\s+/g, '-'))} placeholder="nama-repository" className="input-modern text-sm" />
         {repoCheckStatus === 'checking' && <p className="text-[11px] text-zinc-500">Memeriksa nama repo...</p>}
         {repoCheckStatus === 'available' && <p className="text-[11px] text-green-400">Nama repo tersedia.</p>}
@@ -763,7 +795,7 @@ export default function App() {
         <div onClick={() => !isDeploying && fileInputRef.current?.click()} className={`rounded-xl border border-dashed p-4 text-center ${pickedFileNames.length ? 'border-brand/40 bg-brand/[0.05]' : 'border-white/12 bg-white/[0.02]'}`}>
           <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" multiple />
           <input type="file" ref={folderInputRef} onChange={handleFileChange} className="hidden" multiple {...({ webkitdirectory: 'true', directory: 'true' } as any)} />
-          {pickedFileNames.length > 0 ? <div className="space-y-1.5"><FileArchive size={18} className="mx-auto text-brand-light" /><p className="text-xs text-white">{pickedFileNames.length} file terpilih</p></div> : <div className="space-y-1.5"><Upload size={18} className="mx-auto text-zinc-500" /><p className="text-xs text-zinc-300">Pilih banyak file sekaligus atau file ZIP</p></div>}
+          {pickedFileNames.length > 0 ? <div className="space-y-1.5"><FileArchive size={18} className="mx-auto text-brand-light" /><p className="text-xs text-white">{pickedFileNames.length} file terpilih</p></div> : <div className="space-y-1.5"><Upload size={18} className="mx-auto text-zinc-500" /><p className="text-xs text-zinc-300">Pilih file/folder, ZIP, atau archive lain (RAR/7Z/TAR/GZ).</p></div>}
         </div>
         <div className="grid grid-cols-2 gap-2">
           <button onClick={() => fileInputRef.current?.click()} className="btn-modern text-xs py-2"><Upload size={13} /> Pilih File</button>
@@ -787,6 +819,7 @@ export default function App() {
                     <input type="checkbox" checked={entry.include} onChange={() => toggleUploadEntry(entry.id)} className="mt-0.5" />
                     <FileJson size={13} className="text-zinc-500 shrink-0 mt-0.5" />
                     <span className="text-zinc-300 break-all flex-1 whitespace-normal" title={entry.path}>{entry.path}</span>
+                    {entry.source === 'archive' && <span className="text-[10px] text-amber-300 shrink-0">archive</span>}
                     <span className="text-[10px] text-zinc-500 ml-auto shrink-0">{bytesToReadable(entry.size)}</span>
                   </label>
                 ))}
@@ -829,12 +862,26 @@ export default function App() {
           <div className="grid md:grid-cols-2 gap-3">
             <div className="space-y-2">
               <p className="text-xs text-zinc-300 flex items-center gap-1.5"><FolderTree size={13} /> Struktur file repository {backgroundSyncing && <span className="text-[10px] text-zinc-500">(auto-sync)</span>}</p>
+              <p className="text-[10px] text-zinc-500">Root ditampilkan paling atas, folder di bawahnya akan menjorok seperti tangga agar struktur berlapis terlihat jelas.</p>
               <div className="max-h-56 overflow-y-auto pr-1 space-y-1.5">
                 {repoTree.length > 0 ? renderTreeNodes(repoTree) : <p className="text-xs text-zinc-500">Belum ada file.</p>}
               </div>
+              <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-2 space-y-2">
+                <p className="text-[11px] text-red-200">File dicentang untuk dihapus: <span className="font-semibold">{deletedPaths.length}</span></p>
+                <div className="flex gap-2">
+                  <button onClick={() => setDeletedPaths([])} className="btn-modern text-xs py-1.5 flex-1" disabled={!deletedPaths.length}>Reset centang</button>
+                  <button onClick={applyRepoChanges} className="btn-modern text-xs py-1.5 flex-1" disabled={savingRepo || syncingRepo || !deletedPaths.length}>Hapus file terpilih</button>
+                </div>
+              </div>
               <div className="rounded-lg border border-white/10 bg-black/30 p-2">
-                <p className="text-[11px] text-zinc-400 mb-1">Preview isi file {selectedRepoPath ? `: ${selectedRepoPath}` : ''}</p>
-                <pre className="text-[11px] text-zinc-200 whitespace-pre-wrap break-words max-h-44 overflow-auto">{loadingRepoContent ? 'Memuat isi file...' : (selectedRepoContent || 'Klik nama file untuk menampilkan seluruh isi file.')}</pre>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <p className="text-[11px] text-zinc-400">Preview isi file {selectedRepoPath ? `: ${selectedRepoPath}` : ''}</p>
+                  <div className="flex items-center gap-1">
+                    <button className="icon-btn w-6 h-6" onClick={() => scrollCodePreview(-220)} title="Geser kiri"><ChevronLeft size={12} /></button>
+                    <button className="icon-btn w-6 h-6" onClick={() => scrollCodePreview(220)} title="Geser kanan"><ChevronRight size={12} /></button>
+                  </div>
+                </div>
+                <pre ref={codePreviewRef} className="text-[11px] text-zinc-200 whitespace-pre max-h-44 overflow-auto overflow-x-auto">{loadingRepoContent ? 'Memuat isi file...' : (selectedRepoContent || 'Klik nama file untuk menampilkan seluruh isi file.')}</pre>
               </div>
             </div>
 
@@ -881,7 +928,7 @@ export default function App() {
           <h3 className="text-sm font-semibold text-white">Tentang Website</h3>
         </div>
         <p className="text-xs text-zinc-400 leading-relaxed">
-          RepoFlow adalah web untuk kontrol repository GitHub dengan fokus pembaruan file (hapus/tambah) secara aman, multi-file upload, dan sinkronisasi supaya perubahan dari GitHub utama tidak ketimpa.
+          RepoFlow adalah web manager repository GitHub yang membantu upload project, membaca struktur file bertingkat, melakukan update/hapus file terpilih, dan menjaga sinkronisasi agar workflow coding lebih aman dari HP maupun desktop.
         </p>
         <div className="grid md:grid-cols-2 gap-2">
           <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2.5 text-xs text-zinc-300"><Clock3 size={13} className="inline mr-1 text-brand-light" />Data waktu simpan: dibuat, diubah, terakhir sinkron.</div>
