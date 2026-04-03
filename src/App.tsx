@@ -290,7 +290,7 @@ export default function App() {
   const extractEntries = async (files: FileList) => {
     setIsExtracting(true);
     setExtractProgress(8);
-    const list = Array.from(files);
+    const list = Array.from(files) as File[];
     const nextEntries: UploadEntry[] = [];
     setPickedFileNames(list.map((f) => f.name));
 
@@ -303,10 +303,11 @@ export default function App() {
           const p = paths[i];
           const zipFile = zip.files[p];
           const contentBase64 = await zipFile.async('base64');
+          const raw = await zipFile.async('uint8array');
           nextEntries.push({
             id: `${file.name}:${p}`,
             path: p,
-            size: zipFile._data?.uncompressedSize || 0,
+            size: raw.byteLength,
             source: 'zip',
             include: true,
             contentBase64,
@@ -326,7 +327,7 @@ export default function App() {
     }
 
     setUploadEntries((prev) => {
-      const map = new Map(prev.map((entry) => [entry.path, entry]));
+      const map = new Map<string, UploadEntry>(prev.map((entry) => [entry.path, entry]));
       nextEntries.forEach((entry) => {
         map.set(entry.path, entry);
       });
@@ -481,7 +482,7 @@ export default function App() {
 
   const handleStageFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files?.length) return;
-    const files = Array.from(e.target.files);
+    const files = Array.from(e.target.files) as File[];
     const normalizedPrefix = folderPrefix.trim().replace(/^\/+|\/+$/g, '');
     const staged = await Promise.all(files.map(async (f) => ({
       id: crypto.randomUUID(),
@@ -491,7 +492,7 @@ export default function App() {
     })));
 
     setStagedFiles((prev) => {
-      const map = new Map(prev.map((item) => [item.path, item]));
+      const map = new Map<string, StagedFile>(prev.map((item) => [item.path, item]));
       staged.forEach((item) => map.set(item.path, item));
       return [...map.values()].sort((a, b) => a.path.localeCompare(b.path));
     });
