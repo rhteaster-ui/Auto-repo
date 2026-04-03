@@ -16,6 +16,7 @@ import {
   FileArchive,
   FileCode2,
   FileJson,
+  FileText,
   FolderTree,
   Github,
   Home,
@@ -59,6 +60,14 @@ type StagedFile = {
   path: string;
   size: number;
   contentBase64: string;
+};
+
+type TreeNode = {
+  name: string;
+  path: string;
+  type: 'folder' | 'file';
+  size?: number;
+  children?: TreeNode[];
 };
 
 const WEB_ICON = 'https://res.cloudinary.com/dwiozm4vz/image/upload/v1775203338/nalaxl1mo6eltckuzpoh.png';
@@ -106,6 +115,13 @@ const toBase64 = async (file: File) => {
   return btoa(binary);
 };
 
+const decodeBase64Utf8 = (encoded: string) => {
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+};
+
 export default function App() {
   const [token, setToken] = useState('');
   const [user, setUser] = useState<GitHubToken | null>(null);
@@ -137,12 +153,19 @@ export default function App() {
   const [folderPrefix, setFolderPrefix] = useState('');
   const [uploadFilter, setUploadFilter] = useState('');
   const [syncingRepo, setSyncingRepo] = useState(false);
+  const [backgroundSyncing, setBackgroundSyncing] = useState(false);
   const [savingRepo, setSavingRepo] = useState(false);
+  const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({});
+  const [selectedRepoPath, setSelectedRepoPath] = useState<string>('');
+  const [selectedRepoContent, setSelectedRepoContent] = useState<string>('');
+  const [loadingRepoContent, setLoadingRepoContent] = useState(false);
+  const [deletingFiles, setDeletingFiles] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const updateInputRef = useRef<HTMLInputElement>(null);
   const updateFolderInputRef = useRef<HTMLInputElement>(null);
+  const previewRef = useRef<HTMLPreElement>(null);
 
   useEffect(() => {
     loadUserData();
@@ -192,6 +215,153 @@ export default function App() {
     });
     return [...folders].sort((a, b) => a.localeCompare(b));
   }, [repoFiles]);
+
+  const repoTree = useMemo(() => {
+    const root: TreeNode = { name: '', path: '', type: 'folder', children: [] };
+
+    const ensureFolder = (children: TreeNode[], name: string, path: string) => {
+      let folder = children.find((item) => item.type === 'folder' && item.name === name);
+      if (!folder) {
+        folder = { name, path, type: 'folder', children: [] };
+        children.push(folder);
+      }
+      return folder;
+    };
+
+    repoFiles.forEach((file) => {
+      const parts = file.path.split('/');
+      let pointer = root;
+      parts.forEach((part, index) => {
+        const currentPath = parts.slice(0, index + 1).join('/');
+        const isFile = index === parts.length - 1;
+        if (isFile) {
+          pointer.children?.push({ name: part, path: currentPath, type: 'file', size: file.size });
+          return;
+        }
+        pointer = ensureFolder(pointer.children || [], part, currentPath);
+      });
+    });
+
+    const sortNodes = (nodes: TreeNode[]) => {
+      nodes.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+      nodes.forEach((node) => { if (node.children) sortNodes(node.children); });
+      return nodes;
+    };
+
+    return sortNodes(root.children || []);
+  }, [repoFiles]);
+
+  const loadRepoFileContent = async (path: string) => {
+    if (!selectedProject || !user) return;
+    try {
+      setLoadingRepoContent(true);
+      setSelectedRepoPath(path);
+      const octokit = new Octokit({ auth: user.token });
+      const { data } = await octokit.repos.getContent({
+        owner: selectedProject.owner,
+        repo: selectedProject.repoName,
+        path,
+      });
+      if (Array.isArray(data) || data.type !== 'file' || !data.content) {
+        setSelectedRepoContent('Konten file tidak tersedia.');
+      } else {
+        const decoded = decodeBase64Utf8(data.content.replace(/\n/g, ''));
+        setSelectedRepoContent(decoded);
+      }
+    } catch (err: any) {
+      setSelectedRepoContent(`Gagal memuat isi file: ${err?.message || 'unknown error'}`);
+    } finally {
+      setLoadingRepoContent(false);
+    }
+  };
+
+  const toggleFolder = (path: string) => {
+    setExpandedFolders((prev) => ({ ...prev, [path]: !prev[path] }));
+  };
+
+  const scrollPreview = (direction: 'left' | 'right') => {
+    if (!previewRef.current) return;
+    previewRef.current.scrollBy({
+      left: direction === 'left' ? -220 : 220,
+      behavior: 'smooth',
+    });
+  };
+
+  const renderTreeNodes = (nodes: TreeNode[], depth = 0): React.ReactNode => nodes.map((node, index) => {
+    const isLast = index === nodes.length - 1;
+    const branch = `${'│  '.repeat(depth)}${isLast ? '└─' : '├─'}`;
+    const isExpanded = expandedFolders[node.path] ?? depth < 1;
+    if (node.type === 'folder') {
+      return (
+        <div key={node.path || node.name}>
+          <button type="button" className="w-full text-left text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5 flex items-center gap-2" onClick={() => toggleFolder(node.path)}>
+            <FolderTree size={12} className="text-brand-light" />
+            <span className="text-zinc-200 font-mono">{branch} {node.name}/</span>
+            <span className="ml-auto text-[10px] text-zinc-500">({node.children?.length || 0})</span>
+          </button>
+          {isExpanded && node.children && <div className="mt-1 space-y-1">{renderTreeNodes(node.children, depth + 1)}</div>}
+        </div>
+      );
+    }
+
+    const markedDelete = deletedPaths.includes(node.path);
+    return (
+      <div key={node.path} className="text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5 flex items-start gap-2">
+        <input type="checkbox" checked={markedDelete} onChange={() => toggleDeletePath(node.path)} className="mt-0.5" />
+        <button type="button" className="flex items-start gap-2 min-w-0 flex-1 text-left" onClick={() => loadRepoFileContent(node.path)}>
+          <FileText size={12} className="mt-0.5 text-zinc-400 shrink-0" />
+          <span className="text-zinc-300 break-all font-mono">{branch} {node.name}</span>
+        </button>
+        <span className="text-[10px] text-zinc-500">{bytesToReadable(node.size || 0)}</span>
+      </div>
+    );
+  });
+
+  const deleteCheckedFiles = async () => {
+    if (!selectedProject || !user) return;
+    if (deletedPaths.length === 0) {
+      setError('Centang minimal 1 file yang ingin dihapus.');
+      return;
+    }
+    if (!window.confirm(`Yakin hapus ${deletedPaths.length} file dari repo ${selectedProject.repoName}?`)) return;
+
+    try {
+      setDeletingFiles(true);
+      setError(null);
+      const latest = await getSnapshot(selectedProject);
+      const latestMap = Object.fromEntries(latest.files.map((f) => [f.path, f.sha]));
+      const octokit = new Octokit({ auth: user.token });
+      let removed = 0;
+      for (const path of deletedPaths) {
+        if (!latestMap[path]) continue;
+        await octokit.repos.deleteFile({
+          owner: selectedProject.owner,
+          repo: selectedProject.repoName,
+          path,
+          message: `Delete file via RepoFlow: ${path}`,
+          sha: latestMap[path],
+        });
+        removed += 1;
+      }
+      await addLog({
+        repoName: selectedProject.repoName,
+        owner: selectedProject.owner,
+        action: 'update_repo',
+        detail: `Hapus langsung ${removed} file dari mode tree.`,
+      });
+      setDeletedPaths([]);
+      await syncSelectedRepo(selectedProject);
+      setSuccess(`${removed} file berhasil dihapus dari GitHub.`);
+      setTimeout(() => setSuccess(null), 1800);
+    } catch (err: any) {
+      setError(`Gagal menghapus file: ${err?.message || 'unknown error'}`);
+    } finally {
+      setDeletingFiles(false);
+    }
+  };
 
   const loadUserData = async () => {
     const savedTokens = await db.tokens.toArray();
@@ -402,19 +572,22 @@ export default function App() {
     return { files, headSha: branchData.commit.sha };
   };
 
-  const syncSelectedRepo = async (project?: Project, opts?: { silent?: boolean }) => {
+  const syncSelectedRepo = async (project?: Project, opts?: { silent?: boolean; preserveDraft?: boolean }) => {
     const target = project || selectedProject;
     if (!target || !user) return;
 
     try {
-      setSyncingRepo(true);
+      if (opts?.silent) setBackgroundSyncing(true);
+      else setSyncingRepo(true);
       setError(null);
       const snapshot = await getSnapshot(target);
       setRepoFiles(snapshot.files);
       setBaseShas(Object.fromEntries(snapshot.files.map((f) => [f.path, f.sha])));
       setBaseHeadSha(snapshot.headSha);
-      setDeletedPaths([]);
-      setStagedFiles([]);
+      if (!opts?.preserveDraft) {
+        setDeletedPaths([]);
+        setStagedFiles([]);
+      }
       await upsertProjectMeta(target, { lastSyncedAt: Date.now(), totalFiles: snapshot.files.length });
       if (!opts?.silent) {
         await addLog({ repoName: target.repoName, owner: target.owner, action: 'sync_repo', detail: `Sinkronisasi ${snapshot.files.length} file.` });
@@ -425,17 +598,20 @@ export default function App() {
       setError(`Gagal sinkron: ${err?.message || 'unknown error'}`);
     } finally {
       setSyncingRepo(false);
+      setBackgroundSyncing(false);
     }
   };
 
   useEffect(() => {
     if (tab !== 'tools' || !selectedProject || !user) return undefined;
-    syncSelectedRepo(selectedProject, { silent: true });
+    syncSelectedRepo(selectedProject, { silent: true, preserveDraft: true });
     const intervalId = window.setInterval(() => {
-      syncSelectedRepo(selectedProject, { silent: true });
-    }, 15000);
+      if (!stagedFiles.length && !deletedPaths.length) {
+        syncSelectedRepo(selectedProject, { silent: true, preserveDraft: true });
+      }
+    }, 30000);
     return () => window.clearInterval(intervalId);
-  }, [tab, selectedProject, user]);
+  }, [tab, selectedProject, user, stagedFiles.length, deletedPaths.length]);
 
   const handleStageFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files?.length) return;
@@ -570,7 +746,7 @@ export default function App() {
 
     return rows.map((project) => (
       <div key={project.id} className="app-card p-3 flex items-center justify-between gap-2">
-        <button className="min-w-0 text-left" onClick={() => setSelectedProjectId(project.id || null)}>
+        <button className="min-w-0 text-left" onClick={() => { setSelectedProjectId(project.id || null); setSelectedRepoPath(''); setSelectedRepoContent(''); }}>
           <p className="text-sm text-white font-semibold truncate">{project.repoName}</p>
           <p className="text-[11px] text-zinc-500">Update: {new Date(project.updatedAt).toLocaleString('id-ID')}</p>
         </button>
@@ -714,15 +890,30 @@ export default function App() {
 
           <div className="grid md:grid-cols-2 gap-3">
             <div className="space-y-2">
-              <p className="text-xs text-zinc-300 flex items-center gap-1.5"><FolderTree size={13} /> File di repo (root + nested folder)</p>
+              <p className="text-xs text-zinc-300 flex items-center gap-1.5"><FolderTree size={13} /> Struktur file repository (root vs bertingkat) {backgroundSyncing && <span className="text-[10px] text-zinc-500">(auto-sync)</span>}</p>
+              <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2 text-[11px] text-zinc-400">
+                Root file tampil langsung di level atas, folder bertingkat ditampilkan model tangga (<span className="font-mono">├─</span>/<span className="font-mono">└─</span>).
+              </div>
               <div className="max-h-56 overflow-y-auto pr-1 space-y-1.5">
-                {repoFiles.map((file) => (
-                  <label key={file.path} className="text-xs rounded-lg px-2 py-1.5 bg-white/[0.03] border border-white/5 flex items-start gap-2">
-                    <input type="checkbox" checked={deletedPaths.includes(file.path)} onChange={() => toggleDeletePath(file.path)} className="mt-0.5" />
-                    <span className="break-all text-zinc-300">{file.path}</span>
-                    <span className="text-[10px] text-zinc-500 ml-auto">{bytesToReadable(file.size)}</span>
-                  </label>
-                ))}
+                {repoTree.length > 0 ? renderTreeNodes(repoTree) : <p className="text-xs text-zinc-500">Belum ada file.</p>}
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={deleteCheckedFiles} disabled={deletingFiles || syncingRepo || deletedPaths.length === 0} className="btn-modern w-full text-xs py-2">
+                  {deletingFiles ? <><Loader2 size={13} className="animate-spin" /> Menghapus...</> : <><Trash2 size={13} /> Hapus file dicentang ({deletedPaths.length})</>}
+                </button>
+                <button onClick={() => setDeletedPaths([])} disabled={!deletedPaths.length} className="btn-modern w-full text-xs py-2">
+                  Bersihkan centang hapus
+                </button>
+              </div>
+              <div className="rounded-lg border border-white/10 bg-black/30 p-2">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <p className="text-[11px] text-zinc-400">Preview isi file {selectedRepoPath ? `: ${selectedRepoPath}` : ''}</p>
+                  <div className="flex items-center gap-1">
+                    <button type="button" className="icon-btn w-6 h-6" onClick={() => scrollPreview('left')} title="Geser kiri">←</button>
+                    <button type="button" className="icon-btn w-6 h-6" onClick={() => scrollPreview('right')} title="Geser kanan">→</button>
+                  </div>
+                </div>
+                <pre ref={previewRef} className="text-[11px] text-zinc-200 whitespace-pre max-h-44 overflow-auto">{loadingRepoContent ? 'Memuat isi file...' : (selectedRepoContent || 'Klik nama file untuk menampilkan seluruh isi file.')}</pre>
               </div>
             </div>
 
@@ -753,7 +944,7 @@ export default function App() {
             </div>
           </div>
 
-          <button onClick={applyRepoChanges} disabled={savingRepo || syncingRepo || (!stagedFiles.length && !deletedPaths.length)} className="btn-modern w-full text-sm py-2.5">
+          <button onClick={applyRepoChanges} disabled={savingRepo || syncingRepo || deletingFiles || (!stagedFiles.length && !deletedPaths.length)} className="btn-modern w-full text-sm py-2.5">
             {savingRepo ? <><Loader2 size={15} className="animate-spin" /> Menyimpan...</> : <><Save size={14} /> Simpan perubahan ke GitHub</>}
           </button>
         </section>
@@ -769,11 +960,13 @@ export default function App() {
           <h3 className="text-sm font-semibold text-white">Tentang Website</h3>
         </div>
         <p className="text-xs text-zinc-400 leading-relaxed">
-          RepoFlow adalah web untuk kontrol repository GitHub dengan fokus pembaruan file (hapus/tambah) secara aman, multi-file upload, dan sinkronisasi supaya perubahan dari GitHub utama tidak ketimpa.
+          RepoFlow adalah web manager repository GitHub untuk membantu upload project, meninjau struktur file, melakukan edit terkontrol, dan menjaga proses sinkronisasi agar kerja tim tetap aman dan rapi.
         </p>
         <div className="grid md:grid-cols-2 gap-2">
-          <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2.5 text-xs text-zinc-300"><Clock3 size={13} className="inline mr-1 text-brand-light" />Data waktu simpan: dibuat, diubah, terakhir sinkron.</div>
-          <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2.5 text-xs text-zinc-300"><FolderTree size={13} className="inline mr-1 text-brand-light" />Mendukung file root dan file di dalam folder untuk update.</div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2.5 text-xs text-zinc-300"><FolderTree size={13} className="inline mr-1 text-brand-light" />Tujuan utama: kelola root file dan nested folder dengan aman dari satu panel.</div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2.5 text-xs text-zinc-300"><Clock3 size={13} className="inline mr-1 text-brand-light" />Fungsi inti: sinkronisasi, tambah/update file, pilih file untuk dihapus, dan preview isi file.</div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2.5 text-xs text-zinc-300"><FileCode2 size={13} className="inline mr-1 text-brand-light" />Teknologi: React + TypeScript + Vite + Tailwind CSS.</div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.02] p-2.5 text-xs text-zinc-300"><Github size={13} className="inline mr-1 text-brand-light" />Integrasi API: Octokit GitHub REST API + IndexedDB (Dexie).</div>
         </div>
       </section>
       <section className="app-card p-3.5 space-y-2">
