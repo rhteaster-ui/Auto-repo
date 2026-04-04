@@ -10,6 +10,8 @@ import {
   BookOpenCheck,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Check,
   CheckCircle2,
   Clock3,
@@ -74,6 +76,8 @@ type TreeNode = {
   children?: TreeNode[];
 };
 
+type PreviewKind = 'text' | 'image' | 'binary';
+
 const WEB_ICON = 'https://res.cloudinary.com/dwiozm4vz/image/upload/v1775203338/nalaxl1mo6eltckuzpoh.png';
 const DEV_PROFILE = 'https://res.cloudinary.com/dwiozm4vz/image/upload/v1772959730/ootglrvfmykn6xsto7rq.png';
 const SOCIAL_LINKS = [
@@ -120,12 +124,23 @@ const toBase64 = async (file: File) => {
 };
 
 const ARCHIVE_EXTENSIONS = ['zip', 'rar', '7z', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'tar.gz'];
+const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'];
 
 const getArchiveExtension = (fileName: string) => {
   const lower = fileName.toLowerCase();
   if (lower.endsWith('.tar.gz')) return 'tar.gz';
   const ext = lower.split('.').pop() || '';
   return ext;
+};
+
+const getFileExtension = (fileName: string) => (fileName.toLowerCase().split('.').pop() || '');
+
+const getImageMimeType = (path: string) => {
+  const ext = getFileExtension(path);
+  if (ext === 'jpg') return 'image/jpeg';
+  if (ext === 'svg') return 'image/svg+xml';
+  if (ext === 'ico') return 'image/x-icon';
+  return `image/${ext || 'png'}`;
 };
 
 export default function App() {
@@ -164,6 +179,8 @@ export default function App() {
   const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({});
   const [selectedRepoPath, setSelectedRepoPath] = useState<string>('');
   const [selectedRepoContent, setSelectedRepoContent] = useState<string>('');
+  const [previewKind, setPreviewKind] = useState<PreviewKind>('text');
+  const [selectedRepoDataUrl, setSelectedRepoDataUrl] = useState<string>('');
   const [loadingRepoContent, setLoadingRepoContent] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -171,6 +188,7 @@ export default function App() {
   const updateInputRef = useRef<HTMLInputElement>(null);
   const updateFolderInputRef = useRef<HTMLInputElement>(null);
   const codePreviewRef = useRef<HTMLPreElement>(null);
+  const previewViewportRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadUserData();
@@ -264,6 +282,8 @@ export default function App() {
     try {
       setLoadingRepoContent(true);
       setSelectedRepoPath(path);
+      setPreviewKind('text');
+      setSelectedRepoDataUrl('');
       const octokit = new Octokit({ auth: user.token });
       const { data } = await octokit.repos.getContent({
         owner: selectedProject.owner,
@@ -273,10 +293,28 @@ export default function App() {
       if (Array.isArray(data) || data.type !== 'file' || !data.content) {
         setSelectedRepoContent('Konten file tidak tersedia.');
       } else {
-        const decoded = atob(data.content.replace(/\n/g, ''));
-        setSelectedRepoContent(decoded);
+        const base64Content = data.content.replace(/\n/g, '');
+        const extension = getFileExtension(path);
+        if (IMAGE_EXTENSIONS.includes(extension)) {
+          setPreviewKind('image');
+          setSelectedRepoDataUrl(`data:${getImageMimeType(path)};base64,${base64Content}`);
+          setSelectedRepoContent('Preview gambar tersedia. Gunakan tombol navigasi untuk geser posisi.');
+        } else {
+          const binary = atob(base64Content);
+          const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+          const decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+          const binaryCharCount = decoded.replace(/[\u0000-\u0008\u000E-\u001F]/g, '').length;
+          if (decoded.length > 0 && binaryCharCount / decoded.length < 0.55) {
+            setPreviewKind('binary');
+            setSelectedRepoContent('File ini terdeteksi sebagai binary/non-teks, sehingga tidak ditampilkan sebagai kode.');
+          } else {
+            setSelectedRepoContent(decoded || 'File kosong.');
+          }
+        }
       }
     } catch (err: any) {
+      setPreviewKind('text');
+      setSelectedRepoDataUrl('');
       setSelectedRepoContent(`Gagal memuat isi file: ${err?.message || 'unknown error'}`);
     } finally {
       setLoadingRepoContent(false);
@@ -605,9 +643,16 @@ export default function App() {
     setStagedFiles((prev) => prev.filter((f) => f.path !== path));
   };
 
-  const scrollCodePreview = (delta: number) => {
-    if (!codePreviewRef.current) return;
-    codePreviewRef.current.scrollBy({ left: delta, behavior: 'smooth' });
+  const scrollPreview = (x: number, y: number) => {
+    const target = previewViewportRef.current || codePreviewRef.current;
+    if (!target) return;
+    target.scrollBy({ left: x, top: y, behavior: 'smooth' });
+  };
+
+  const resetPreviewPosition = () => {
+    const target = previewViewportRef.current || codePreviewRef.current;
+    if (!target) return;
+    target.scrollTo({ left: 0, top: 0, behavior: 'smooth' });
   };
 
   const applyRepoChanges = async () => {
@@ -716,7 +761,13 @@ export default function App() {
 
     return rows.map((project) => (
       <div key={project.id} className="app-card p-3 flex items-center justify-between gap-2">
-        <button className="min-w-0 text-left" onClick={() => { setSelectedProjectId(project.id || null); setSelectedRepoPath(''); setSelectedRepoContent(''); }}>
+        <button className="min-w-0 text-left" onClick={() => {
+          setSelectedProjectId(project.id || null);
+          setSelectedRepoPath('');
+          setSelectedRepoContent('');
+          setSelectedRepoDataUrl('');
+          setPreviewKind('text');
+        }}>
           <p className="text-sm text-white font-semibold truncate">{project.repoName}</p>
           <p className="text-[11px] text-zinc-500">Update: {new Date(project.updatedAt).toLocaleString('id-ID')}</p>
         </button>
@@ -876,12 +927,25 @@ export default function App() {
               <div className="rounded-lg border border-white/10 bg-black/30 p-2">
                 <div className="flex items-center justify-between gap-2 mb-1">
                   <p className="text-[11px] text-zinc-400">Preview isi file {selectedRepoPath ? `: ${selectedRepoPath}` : ''}</p>
-                  <div className="flex items-center gap-1">
-                    <button className="icon-btn w-6 h-6" onClick={() => scrollCodePreview(-220)} title="Geser kiri"><ChevronLeft size={12} /></button>
-                    <button className="icon-btn w-6 h-6" onClick={() => scrollCodePreview(220)} title="Geser kanan"><ChevronRight size={12} /></button>
+                  <div className="flex items-center gap-1 flex-wrap justify-end">
+                    <button className="icon-btn w-6 h-6" onClick={() => scrollPreview(-220, 0)} title="Geser kiri"><ChevronLeft size={12} /></button>
+                    <button className="icon-btn w-6 h-6" onClick={() => scrollPreview(220, 0)} title="Geser kanan"><ChevronRight size={12} /></button>
+                    <button className="icon-btn w-6 h-6" onClick={() => scrollPreview(0, -140)} title="Geser atas"><ChevronUp size={12} /></button>
+                    <button className="icon-btn w-6 h-6" onClick={() => scrollPreview(0, 140)} title="Geser bawah"><ChevronDown size={12} /></button>
+                    <button className="icon-btn w-6 h-6 text-[9px]" onClick={resetPreviewPosition} title="Reset posisi">RST</button>
                   </div>
                 </div>
-                <pre ref={codePreviewRef} className="text-[11px] text-zinc-200 whitespace-pre max-h-44 overflow-auto overflow-x-auto">{loadingRepoContent ? 'Memuat isi file...' : (selectedRepoContent || 'Klik nama file untuk menampilkan seluruh isi file.')}</pre>
+                <div ref={previewViewportRef} className="max-h-44 overflow-auto rounded-md border border-white/5 bg-black/20">
+                  {loadingRepoContent ? (
+                    <pre ref={codePreviewRef} className="text-[11px] text-zinc-200 whitespace-pre p-2">Memuat isi file...</pre>
+                  ) : previewKind === 'image' && selectedRepoDataUrl ? (
+                    <div className="min-w-full min-h-full p-2">
+                      <img src={selectedRepoDataUrl} alt={selectedRepoPath || 'Preview gambar'} className="max-w-none h-auto rounded-md border border-white/10" />
+                    </div>
+                  ) : (
+                    <pre ref={codePreviewRef} className="text-[11px] text-zinc-200 whitespace-pre p-2">{selectedRepoContent || 'Klik nama file untuk menampilkan seluruh isi file.'}</pre>
+                  )}
+                </div>
               </div>
             </div>
 
