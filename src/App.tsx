@@ -182,6 +182,8 @@ export default function App() {
   const [previewKind, setPreviewKind] = useState<PreviewKind>('text');
   const [selectedRepoDataUrl, setSelectedRepoDataUrl] = useState<string>('');
   const [loadingRepoContent, setLoadingRepoContent] = useState(false);
+  const [previewWrap, setPreviewWrap] = useState(false);
+  const [previewZoom, setPreviewZoom] = useState(1);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -655,6 +657,10 @@ export default function App() {
     target.scrollTo({ left: 0, top: 0, behavior: 'smooth' });
   };
 
+  const zoomPreview = (factor: number) => {
+    setPreviewZoom((prev) => Math.min(3, Math.max(0.4, Number((prev * factor).toFixed(2)))));
+  };
+
   const applyRepoChanges = async () => {
     if (!selectedProject || !user) return;
     if (stagedFiles.length === 0 && deletedPaths.length === 0) {
@@ -767,6 +773,8 @@ export default function App() {
           setSelectedRepoContent('');
           setSelectedRepoDataUrl('');
           setPreviewKind('text');
+          setPreviewWrap(false);
+          setPreviewZoom(1);
         }}>
           <p className="text-sm text-white font-semibold truncate">{project.repoName}</p>
           <p className="text-[11px] text-zinc-500">Update: {new Date(project.updatedAt).toLocaleString('id-ID')}</p>
@@ -911,7 +919,7 @@ export default function App() {
           </div>
 
           <div className="grid md:grid-cols-2 gap-3">
-            <div className="space-y-2">
+            <div className="space-y-2 min-w-0">
               <p className="text-xs text-zinc-300 flex items-center gap-1.5"><FolderTree size={13} /> Struktur file repository {backgroundSyncing && <span className="text-[10px] text-zinc-500">(auto-sync)</span>}</p>
               <p className="text-[10px] text-zinc-500">Root ditampilkan paling atas, folder di bawahnya akan menjorok seperti tangga agar struktur berlapis terlihat jelas.</p>
               <div className="max-h-56 overflow-y-auto pr-1 space-y-1.5">
@@ -932,24 +940,38 @@ export default function App() {
                     <button className="icon-btn w-6 h-6" onClick={() => scrollPreview(220, 0)} title="Geser kanan"><ChevronRight size={12} /></button>
                     <button className="icon-btn w-6 h-6" onClick={() => scrollPreview(0, -140)} title="Geser atas"><ChevronUp size={12} /></button>
                     <button className="icon-btn w-6 h-6" onClick={() => scrollPreview(0, 140)} title="Geser bawah"><ChevronDown size={12} /></button>
+                    {previewKind === 'text' && (
+                      <button className="icon-btn h-6 px-1.5 w-auto text-[9px]" onClick={() => setPreviewWrap((prev) => !prev)} title="Toggle wrap">
+                        {previewWrap ? 'NOWRAP' : 'WRAP'}
+                      </button>
+                    )}
+                    {previewKind === 'image' && (
+                      <>
+                        <button className="icon-btn h-6 px-1.5 w-auto text-[10px]" onClick={() => zoomPreview(0.85)} title="Zoom out">-</button>
+                        <button className="icon-btn h-6 px-1.5 w-auto text-[9px]" onClick={() => setPreviewZoom(1)} title="Zoom normal">{Math.round(previewZoom * 100)}%</button>
+                        <button className="icon-btn h-6 px-1.5 w-auto text-[10px]" onClick={() => zoomPreview(1.15)} title="Zoom in">+</button>
+                      </>
+                    )}
                     <button className="icon-btn w-6 h-6 text-[9px]" onClick={resetPreviewPosition} title="Reset posisi">RST</button>
                   </div>
                 </div>
-                <div ref={previewViewportRef} className="max-h-44 overflow-auto rounded-md border border-white/5 bg-black/20">
+                <div ref={previewViewportRef} className="max-h-44 overflow-auto overscroll-contain rounded-md border border-white/5 bg-black/20">
                   {loadingRepoContent ? (
                     <pre ref={codePreviewRef} className="text-[11px] text-zinc-200 whitespace-pre p-2">Memuat isi file...</pre>
                   ) : previewKind === 'image' && selectedRepoDataUrl ? (
                     <div className="min-w-full min-h-full p-2">
-                      <img src={selectedRepoDataUrl} alt={selectedRepoPath || 'Preview gambar'} className="max-w-none h-auto rounded-md border border-white/10" />
+                      <div style={{ transform: `scale(${previewZoom})`, transformOrigin: 'top left', width: 'max-content' }}>
+                        <img src={selectedRepoDataUrl} alt={selectedRepoPath || 'Preview gambar'} className="max-w-none h-auto rounded-md border border-white/10" />
+                      </div>
                     </div>
                   ) : (
-                    <pre ref={codePreviewRef} className="text-[11px] text-zinc-200 whitespace-pre p-2">{selectedRepoContent || 'Klik nama file untuk menampilkan seluruh isi file.'}</pre>
+                    <pre ref={codePreviewRef} className={`text-[11px] text-zinc-200 p-2 ${previewWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre min-w-max'}`}>{selectedRepoContent || 'Klik nama file untuk menampilkan seluruh isi file.'}</pre>
                   )}
                 </div>
               </div>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-2 min-w-0">
               <p className="text-xs text-zinc-300">Tambahkan / update file (mendukung multi upload)</p>
               <input value={folderPrefix} onChange={(e) => setFolderPrefix(e.target.value)} placeholder="Folder tujuan (opsional), contoh: src/components" className="input-modern text-xs" />
               {repoFolders.length > 0 && (
