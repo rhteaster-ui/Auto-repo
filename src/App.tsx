@@ -77,9 +77,12 @@ type TreeNode = {
 };
 
 type PreviewKind = 'text' | 'image' | 'binary';
+type TokenValidationFailure = 'empty' | 'bad_format' | 'unauthorized' | 'rate_limited' | 'network' | 'unknown';
+type GitHubFailureType = 'unauthorized' | 'rate_limited' | 'forbidden' | 'not_found' | 'network' | 'validation' | 'unknown';
 
-const WEB_ICON = 'https://res.cloudinary.com/dwiozm4vz/image/upload/v1775203338/nalaxl1mo6eltckuzpoh.png';
-const DEV_PROFILE = 'https://res.cloudinary.com/dwiozm4vz/image/upload/v1772959730/ootglrvfmykn6xsto7rq.png';
+const WEB_ICON = '/src/icon.png';
+const APP_BANNER = '/src/banner.png';
+const DEV_PROFILE = '/src/icon.png';
 const SOCIAL_LINKS = [
   { label: 'WhatsApp Channel', url: 'https://whatsapp.com/channel/0029VbBjyjlJ93wa6hwSWa0p' },
   { label: 'Instagram Dev', url: 'https://www.instagram.com/rahmt_nhw?igsh=MWQwcnB3bTA2ZnVidg==' },
@@ -143,6 +146,31 @@ const getImageMimeType = (path: string) => {
   return `image/${ext || 'png'}`;
 };
 
+const normalizeTokenInput = (value: string) => value.replace(/\u00A0/g, ' ').trim();
+
+const inferTokenFailure = (err: any): TokenValidationFailure => {
+  if (err?.status === 401) return 'unauthorized';
+  if (err?.status === 429) return 'rate_limited';
+  if (err?.name === 'HttpError' && !err?.status) return 'network';
+  return 'unknown';
+};
+
+const inferGitHubFailure = (err: any): GitHubFailureType => {
+  if (err?.status === 401) return 'unauthorized';
+  if (err?.status === 403) return 'forbidden';
+  if (err?.status === 404) return 'not_found';
+  if (err?.status === 422) return 'validation';
+  if (err?.status === 429) return 'rate_limited';
+  if (err?.name === 'HttpError' && !err?.status) return 'network';
+  return 'unknown';
+};
+
+const appLogger = {
+  error(event: string, payload: Record<string, unknown>) {
+    console.error(JSON.stringify({ level: 'error', event, ts: new Date().toISOString(), ...payload }));
+  },
+};
+
 export default function App() {
   const [token, setToken] = useState('');
   const [user, setUser] = useState<GitHubToken | null>(null);
@@ -158,6 +186,7 @@ export default function App() {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [tokenDebugHint, setTokenDebugHint] = useState<string | null>(null);
   const [searchProject, setSearchProject] = useState('');
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [hasGithubAccount, setHasGithubAccount] = useState<'yes' | 'no' | null>(null);
@@ -184,6 +213,8 @@ export default function App() {
   const [loadingRepoContent, setLoadingRepoContent] = useState(false);
   const [previewWrap, setPreviewWrap] = useState(false);
   const [previewZoom, setPreviewZoom] = useState(1);
+  const [iconSrc, setIconSrc] = useState(WEB_ICON);
+  const [bannerSrc, setBannerSrc] = useState(APP_BANNER);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -389,22 +420,48 @@ export default function App() {
   };
 
   const validateToken = async (inputToken: string) => {
-    if (!inputToken.trim()) {
+    const normalizedToken = normalizeTokenInput(inputToken);
+    if (!normalizedToken) {
       setError('Token GitHub wajib diisi.');
+      setTokenDebugHint('Input token kosong setelah trim. Pastikan token tidak hanya berisi spasi.');
+      return;
+    }
+    if (!/^gh[pousr]_[A-Za-z0-9_]{20,}$/.test(normalizedToken)) {
+      setError('Format token terlihat tidak sesuai standar GitHub PAT.');
+      setTokenDebugHint('Pastikan token diawali ghp_/github_pat_/gho_/ghu_/ghs_ dan tidak terpotong.');
       return;
     }
     try {
       setError(null);
-      const octokit = new Octokit({ auth: inputToken.trim() });
+      setTokenDebugHint(null);
+      const octokit = new Octokit({ auth: normalizedToken, request: { timeout: 10000 } });
       const { data } = await octokit.users.getAuthenticated();
-      const userData: GitHubToken = { token: inputToken.trim(), username: data.login, avatarUrl: data.avatar_url };
+      const userData: GitHubToken = { token: normalizedToken, username: data.login, avatarUrl: data.avatar_url };
       await db.tokens.clear();
       await db.tokens.add(userData);
       setUser(userData);
       setSuccess('Akun GitHub berhasil terhubung.');
       setTimeout(() => setSuccess(null), 2200);
-    } catch {
-      setError('Token tidak valid atau koneksi bermasalah.');
+    } catch (err: any) {
+      const failureType = inferTokenFailure(err);
+      if (failureType === 'unauthorized') {
+        setError('Token ditolak GitHub (401). Cek expiry/scope/token revocation.');
+        setTokenDebugHint('Minimal scope: repo. Jika organisasi memakai SSO, authorize token ke organization.');
+      } else if (failureType === 'rate_limited') {
+        setError('Permintaan kena rate limit GitHub. Coba beberapa saat lagi.');
+        setTokenDebugHint('Terlalu banyak validasi token dari IP/perangkat yang sama.');
+      } else if (failureType === 'network') {
+        setError('Koneksi ke GitHub gagal.');
+        setTokenDebugHint('Kemungkinan DNS/firewall/proxy memblokir api.github.com.');
+      } else {
+        setError('Token tidak valid atau koneksi bermasalah.');
+        setTokenDebugHint('Buka DevTools > Network untuk cek response /user dan status code.');
+      }
+      appLogger.error('token_validation_failed', {
+        failureType,
+        status: err?.status ?? null,
+        requestId: err?.response?.headers?.['x-github-request-id'] ?? null,
+      });
     }
   };
 
@@ -478,9 +535,13 @@ export default function App() {
       setError(null);
       setStatus('Menganalisis file...');
       await extractEntries(e.target.files);
-    } catch {
+    } catch (err: any) {
       setUploadEntries([]);
-      setError('File tidak bisa dibaca. Pastikan ZIP valid atau file tidak rusak.');
+      setError('File tidak bisa dibaca. Pastikan ZIP valid / file tidak rusak / format didukung.');
+      appLogger.error('extract_entries_failed', {
+        reason: err?.message ?? 'unknown',
+        fileCount: e.target.files?.length ?? 0,
+      });
     } finally {
       e.target.value = '';
     }
@@ -506,7 +567,8 @@ export default function App() {
     setProgress(10);
 
     try {
-      const octokit = new Octokit({ auth: user.token });
+      const octokit = new Octokit({ auth: user.token, request: { timeout: 12000 } });
+      await octokit.users.getAuthenticated();
       const finalRepo = repoName.trim();
       const { data: repo } = await octokit.repos.createForAuthenticatedUser({ name: finalRepo, auto_init: false });
       setStatus('Mengunggah file awal...');
@@ -545,7 +607,20 @@ export default function App() {
       setPickedFileNames([]);
       setRepoCheckStatus('idle');
     } catch (err: any) {
-      setError(`Push gagal: ${err?.message || 'Terjadi kesalahan.'}`);
+      const failureType = inferGitHubFailure(err);
+      if (failureType === 'unauthorized') setError('Push gagal: token tidak valid / expired. Hubungkan ulang token GitHub.');
+      else if (failureType === 'forbidden') setError('Push gagal: akses ditolak GitHub. Cek permission token dan limit akun.');
+      else if (failureType === 'rate_limited') setError('Push gagal: rate limit GitHub. Coba ulang beberapa menit lagi.');
+      else if (failureType === 'validation') setError('Push gagal: validasi GitHub gagal (nama repo/path file mungkin tidak valid).');
+      else if (failureType === 'network') setError('Push gagal: koneksi ke GitHub terputus. Coba jaringan stabil lalu ulang.');
+      else setError(`Push gagal: ${err?.message || 'Terjadi kesalahan.'}`);
+      appLogger.error('deploy_repo_failed', {
+        failureType,
+        status: err?.status ?? null,
+        requestId: err?.response?.headers?.['x-github-request-id'] ?? null,
+        selectedEntries: selectedEntries.length,
+        repoName: repoName.trim(),
+      });
     } finally {
       setIsDeploying(false);
       setTimeout(() => {
@@ -1010,7 +1085,7 @@ export default function App() {
     <div className="space-y-3">
       <section className="app-card p-3.5 space-y-2">
         <div className="flex items-center gap-2">
-          <img src={WEB_ICON} alt="RepoFlow icon" className="w-8 h-8 rounded-lg border border-white/15" referrerPolicy="no-referrer" />
+          <img src={iconSrc} alt="RepoFlow icon" className="w-8 h-8 rounded-lg border border-white/15" onError={() => setIconSrc('/icon.png')} />
           <h3 className="text-sm font-semibold text-white">Tentang Website</h3>
         </div>
         <p className="text-xs text-zinc-400 leading-relaxed">
@@ -1025,7 +1100,7 @@ export default function App() {
       </section>
       <section className="app-card p-3.5 space-y-2">
         <div className="flex items-center gap-2">
-          <img src={DEV_PROFILE} alt="Developer profile" className="w-10 h-10 rounded-full border border-white/15 object-cover" referrerPolicy="no-referrer" />
+          <img src={iconSrc} alt="Developer profile" className="w-10 h-10 rounded-full border border-white/15 object-cover" onError={() => setIconSrc('/icon.png')} />
           <div>
             <p className="text-sm text-white font-semibold">Info Developer</p>
             <p className="text-[11px] text-zinc-500">Rahmat / rAi Engine</p>
@@ -1047,7 +1122,8 @@ export default function App() {
     return (
       <div className="min-h-screen px-4 py-8 flex items-center justify-center">
         <div className="w-full max-w-md app-card p-5 space-y-4 text-center">
-          <img src={WEB_ICON} alt="RepoFlow logo" className="w-12 h-12 rounded-2xl mx-auto border border-white/15" referrerPolicy="no-referrer" />
+          <img src={bannerSrc} alt="RepoFlow banner" className="w-full h-24 rounded-2xl mx-auto border border-white/15 object-cover" onError={() => setBannerSrc('/banner.png')} />
+          <img src={iconSrc} alt="RepoFlow logo" className="w-12 h-12 rounded-2xl mx-auto border border-white/15 -mt-9 bg-black/50 p-1" onError={() => setIconSrc('/icon.png')} />
           <h1 className="text-xl font-bold text-white">Selamat Datang di RepoFlow</h1>
           <p className="text-xs text-zinc-400 leading-relaxed">Aplikasi push project modern untuk upload ZIP/semua file ke GitHub, memantau aktivitas, dan mengelola repository dari HP maupun desktop.</p>
           <button onClick={startApp} className="btn-modern w-full text-sm py-2.5">Lanjutkan ke Aplikasi</button>
@@ -1060,7 +1136,7 @@ export default function App() {
     <div className="min-h-screen pb-[86px] md:pb-0">
       <header className="sticky top-0 z-40 border-b border-white/10 bg-bg-dark/90 backdrop-blur-xl px-4 py-3">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-2.5"><img src={WEB_ICON} alt="RepoFlow logo" className="w-8 h-8 rounded-lg border border-white/15" referrerPolicy="no-referrer" /><div><p className="text-xs text-zinc-500">RepoFlow App</p><h1 className="text-sm text-white font-semibold">{tab === 'dashboard' && 'Dashboard'}{tab === 'upload' && 'Upload & Push Git'}{tab === 'tools' && 'Tools Repository'}{tab === 'info' && 'Info Website'}</h1></div></div>
+          <div className="flex items-center gap-2.5"><img src={iconSrc} alt="RepoFlow logo" className="w-8 h-8 rounded-lg border border-white/15" onError={() => setIconSrc('/icon.png')} /><div><p className="text-xs text-zinc-500">RepoFlow App</p><h1 className="text-sm text-white font-semibold">{tab === 'dashboard' && 'Dashboard'}{tab === 'upload' && 'Upload & Push Git'}{tab === 'tools' && 'Tools Repository'}{tab === 'info' && 'Info Website'}</h1></div></div>
           {user ? <div className="flex items-center gap-2"><Github size={14} className="text-zinc-400" /><span className="text-xs text-zinc-300">@{user.username}</span></div> : <span className="text-[11px] text-zinc-500">Belum terhubung</span>}
         </div>
       </header>
@@ -1077,6 +1153,7 @@ export default function App() {
             <AnimatePresence mode="wait">
               <motion.div key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.18 }}>
                 {(error || success) && <div className={`mb-3 p-2.5 rounded-xl text-xs flex items-center gap-2 border ${error ? 'bg-red-500/10 border-red-500/20 text-red-300' : 'bg-green-500/10 border-green-500/20 text-green-300'}`}>{error ? <AlertCircle size={15} /> : <CheckCircle2 size={15} />} {error || success}</div>}
+                {tokenDebugHint && <div className="mb-3 p-2.5 rounded-xl text-[11px] border bg-amber-500/10 border-amber-500/20 text-amber-200">{tokenDebugHint}</div>}
                 {tab === 'dashboard' && renderDashboard()}
                 {tab === 'upload' && renderUpload()}
                 {tab === 'tools' && renderTools()}
