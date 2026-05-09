@@ -42,7 +42,7 @@ import {
 import { AnimatePresence, motion } from 'motion/react';
 import JSZip from 'jszip';
 import { Octokit } from '@octokit/rest';
-import { db, type GitHubToken, type Project, type ActivityLog } from './lib/db';
+import { db, type GitHubAccount, type Project, type ActivityLog } from './lib/db';
 
 type AppTab = 'dashboard' | 'upload' | 'tools' | 'info';
 
@@ -50,7 +50,8 @@ type UploadEntry = {
   id: string;
   path: string;
   size: number;
-  source: 'zip' | 'single' | 'archive';
+  source: 'single' | 'folder' | 'zip-raw' | 'zip-extracted';
+  status?: 'new' | 'overwrite' | 'same' | 'delete' | 'unknown';
   include: boolean;
   contentBase64: string;
 };
@@ -80,9 +81,9 @@ type PreviewKind = 'text' | 'image' | 'binary';
 type TokenValidationFailure = 'empty' | 'bad_format' | 'unauthorized' | 'rate_limited' | 'network' | 'unknown';
 type GitHubFailureType = 'unauthorized' | 'rate_limited' | 'forbidden' | 'not_found' | 'network' | 'validation' | 'unknown';
 
-const WEB_ICON = '/src/icon.png';
-const APP_BANNER = '/src/banner.png';
-const DEV_PROFILE = '/src/icon.png';
+const WEB_ICON = '/icon.png';
+const APP_BANNER = '/banner.png';
+const DEV_PROFILE = '/icon.png';
 const SOCIAL_LINKS = [
   { label: 'WhatsApp Channel', url: 'https://whatsapp.com/channel/0029VbBjyjlJ93wa6hwSWa0p' },
   { label: 'Instagram Dev', url: 'https://www.instagram.com/rahmt_nhw?igsh=MWQwcnB3bTA2ZnVidg==' },
@@ -147,6 +148,9 @@ const getImageMimeType = (path: string) => {
 };
 
 const normalizeTokenInput = (value: string) => value.replace(/\u00A0/g, ' ').trim();
+const inferTokenType = (token: string): 'classic' | 'fine-grained' | 'unknown' => token.startsWith('github_pat_') ? 'fine-grained' : token.startsWith('gh') ? 'classic' : 'unknown';
+const maskToken = (token: string) => token.length < 12 ? '••••' : `${token.slice(0, 6)}••••${token.slice(-4)}`;
+const sanitizePath = (input: string) => { const path = input.replace(/\\/g,'/').replace(/^\/+|\/+$/g,'').replace(/\/+/g,'/'); if (!path || path.startsWith('/') || path.includes('..')) return null; const blocked=['.git/','node_modules/','__MACOSX/']; if (blocked.some((b)=>path===b.slice(0,-1)||path.startsWith(b))) return null; if (path.endsWith('.DS_Store')) return null; return path; };
 
 const inferTokenFailure = (err: any): TokenValidationFailure => {
   if (err?.status === 401) return 'unauthorized';
@@ -173,7 +177,9 @@ const appLogger = {
 
 export default function App() {
   const [token, setToken] = useState('');
-  const [user, setUser] = useState<GitHubToken | null>(null);
+  const [accountLabel, setAccountLabel] = useState('Akun Utama');
+  const [accounts, setAccounts] = useState<GitHubAccount[]>([]);
+  const [user, setUser] = useState<GitHubAccount | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [repoName, setRepoName] = useState('');
@@ -187,6 +193,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [tokenDebugHint, setTokenDebugHint] = useState<string | null>(null);
+  const [tokenDiagnostics, setTokenDiagnostics] = useState<string>('');
   const [searchProject, setSearchProject] = useState('');
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [hasGithubAccount, setHasGithubAccount] = useState<'yes' | 'no' | null>(null);
@@ -225,8 +232,6 @@ export default function App() {
 
   useEffect(() => {
     loadUserData();
-    loadProjects();
-    loadLogs();
   }, []);
 
   useEffect(() => {
@@ -389,34 +394,48 @@ export default function App() {
     );
   });
 
+
+  const setActiveAccount = async (accountId: number) => {
+    await db.accounts.toCollection().modify({ active: 0 });
+    await db.accounts.update(accountId, { active: 1, lastValidatedAt: Date.now() });
+    await loadUserData();
+    setSelectedProjectId(null);
+    setRepoFiles([]);
+    setStagedFiles([]);
+    setDeletedPaths([]);
+  };
+
   const loadUserData = async () => {
-    const savedTokens = await db.tokens.toArray();
-    if (savedTokens.length > 0) {
-      setUser(savedTokens[0]);
-      setToken(savedTokens[0].token);
-      setHasGithubAccount('yes');
-    }
+    const savedAccounts = await db.accounts.toArray();
+    setAccounts(savedAccounts);
+    const active = savedAccounts.find((a) => a.active === 1) || savedAccounts[0] || null;
+    setUser(active);
+    setToken(active?.token || '');
+    setHasGithubAccount(active ? 'yes' : null);
+    await loadProjects(active?.id);
+    await loadLogs(active?.id);
   };
 
-  const loadProjects = async () => {
-    const savedProjects = await db.projects.orderBy('updatedAt').reverse().toArray();
-    setProjects(savedProjects);
+  const loadProjects = async (accountId?: number) => {
+    const q = accountId ? db.projects.where('accountId').equals(accountId) : db.projects.toCollection();
+    const savedProjects = await q.sortBy('updatedAt');
+    setProjects(savedProjects.reverse());
   };
 
-  const loadLogs = async () => {
-    const savedLogs = await db.logs.orderBy('createdAt').reverse().limit(40).toArray();
-    setLogs(savedLogs);
+  const loadLogs = async (accountId?: number) => {
+    const q = accountId ? db.logs.where('accountId').equals(accountId) : db.logs.toCollection();
+    const savedLogs = await q.sortBy('createdAt');
+    setLogs(savedLogs.reverse().slice(0, 40));
   };
-
   const addLog = async (log: Omit<ActivityLog, 'id' | 'createdAt'>) => {
-    await db.logs.add({ ...log, createdAt: Date.now() });
-    await loadLogs();
+    await db.logs.add({ ...log, accountId: user?.id, createdAt: Date.now() });
+    await loadLogs(user?.id);
   };
 
   const upsertProjectMeta = async (project: Project, info: Partial<Project>) => {
     if (!project.id) return;
     await db.projects.update(project.id, { ...info, updatedAt: Date.now() });
-    await loadProjects();
+    await loadProjects(user?.id);
   };
 
   const validateToken = async (inputToken: string) => {
@@ -426,9 +445,8 @@ export default function App() {
       setTokenDebugHint('Input token kosong setelah trim. Pastikan token tidak hanya berisi spasi.');
       return;
     }
-    if (!/^gh[pousr]_[A-Za-z0-9_]{20,}$/.test(normalizedToken)) {
-      setError('Format token terlihat tidak sesuai standar GitHub PAT.');
-      setTokenDebugHint('Pastikan token diawali ghp_/github_pat_/gho_/ghu_/ghs_ dan tidak terpotong.');
+    if (normalizedToken.length < 20) {
+      setError('Token terlihat terlalu pendek. Cek lagi token yang disalin.');
       return;
     }
     try {
@@ -436,11 +454,13 @@ export default function App() {
       setTokenDebugHint(null);
       const octokit = new Octokit({ auth: normalizedToken, request: { timeout: 10000 } });
       const { data } = await octokit.users.getAuthenticated();
-      const userData: GitHubToken = { token: normalizedToken, username: data.login, avatarUrl: data.avatar_url };
-      await db.tokens.clear();
-      await db.tokens.add(userData);
-      setUser(userData);
-      setSuccess('Akun GitHub berhasil terhubung.');
+      const now = Date.now();
+      const userData: GitHubAccount = { label: accountLabel || data.login, token: normalizedToken, username: data.login, avatarUrl: data.avatar_url, tokenType: inferTokenType(normalizedToken), active: 1, createdAt: now, lastValidatedAt: now };
+      await db.accounts.toCollection().modify({ active: 0 });
+      await db.accounts.add(userData);
+      await loadUserData();
+      setTokenDiagnostics(`Akun terdeteksi @${data.login} • token ${userData.tokenType}.`);
+      setSuccess('Akun GitHub berhasil ditambahkan dan diaktifkan.');
       setTimeout(() => setSuccess(null), 2200);
     } catch (err: any) {
       const failureType = inferTokenFailure(err);
@@ -466,9 +486,8 @@ export default function App() {
   };
 
   const handleLogout = async () => {
-    await db.tokens.clear();
-    setUser(null);
-    setToken('');
+    if (user?.id) await db.accounts.delete(user.id);
+    await loadUserData();
     setRepoCheckStatus('idle');
   };
 
@@ -492,9 +511,9 @@ export default function App() {
           const contentBase64 = await zipFile.async('base64');
           nextEntries.push({
             id: `${file.name}:${p}`,
-            path: p,
+            path: sanitizePath(p) || '',
             size: fileBuffer.length,
-            source: 'zip',
+            source: 'zip-extracted',
             include: true,
             contentBase64,
           });
@@ -502,16 +521,16 @@ export default function App() {
       } else if (ARCHIVE_EXTENSIONS.includes(archiveExt)) {
         nextEntries.push({
           id: `${file.name}:${crypto.randomUUID()}`,
-          path: file.webkitRelativePath || file.name,
+          path: sanitizePath(file.webkitRelativePath || file.name) || '',
           size: file.size,
-          source: 'archive',
+          source: 'zip-raw',
           include: true,
           contentBase64: await toBase64(file),
         });
       } else {
         nextEntries.push({
           id: `${file.name}:${crypto.randomUUID()}`,
-          path: file.webkitRelativePath || file.name,
+          path: sanitizePath(file.webkitRelativePath || file.name) || '',
           size: file.size,
           source: 'single',
           include: true,
@@ -521,7 +540,7 @@ export default function App() {
       setExtractProgress(Math.round(((index + 1) / list.length) * 100));
     }
 
-    setUploadEntries(nextEntries);
+    setUploadEntries(nextEntries.filter((e)=>e.path));
     setStatus(`Total ${nextEntries.length} file siap diproses.`);
     setTimeout(() => {
       setIsExtracting(false);
@@ -587,6 +606,7 @@ export default function App() {
 
       const now = Date.now();
       const newProject: Project = {
+        accountId: user.id,
         repoName: finalRepo,
         owner: user.username,
         url: repo.html_url,
@@ -598,7 +618,7 @@ export default function App() {
 
       await db.projects.add(newProject);
       await addLog({ repoName: finalRepo, owner: user.username, action: 'create_repo', detail: `Repo dibuat dengan ${selectedEntries.length} file.` });
-      await loadProjects();
+      await loadProjects(user?.id);
 
       setProgress(100);
       setSuccess(`Push ${finalRepo} berhasil.`);
@@ -819,7 +839,7 @@ export default function App() {
       await octokit.repos.delete({ owner: project.owner, repo: project.repoName });
       if (project.id) await db.projects.delete(project.id);
       await addLog({ repoName: project.repoName, owner: project.owner, action: 'delete_repo', detail: 'Repository dihapus dari GitHub.' });
-      await loadProjects();
+      await loadProjects(user?.id);
       setSuccess('Repository berhasil dihapus.');
       if (selectedProjectId === project.id) {
         setSelectedProjectId(null);
@@ -914,7 +934,7 @@ export default function App() {
               <button onClick={() => setHasGithubAccount('no')} className={`text-xs py-2 rounded-lg border ${hasGithubAccount === 'no' ? 'bg-brand/20 border-brand/50 text-brand-light' : 'border-white/10 text-zinc-300'}`}>Belum punya</button>
             </div>
             {hasGithubAccount === 'no' && <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30"><p className="text-xs text-amber-100">Silakan daftar akun GitHub terlebih dahulu.</p><a href="https://github.com/signup" target="_blank" className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-amber-100" rel="noreferrer"><UserRoundPlus size={13} /> Daftar GitHub <ExternalLink size={13} /></a></div>}
-            {hasGithubAccount === 'yes' && <><input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Masukkan Personal Access Token" className="input-modern text-sm" /><button onClick={() => validateToken(token)} className="btn-modern w-full text-sm py-2.5">Hubungkan Token</button><a href="https://github.com/settings/tokens/new?scopes=repo,delete_repo&description=RepoFlow_App" target="_blank" className="inline-flex items-center gap-2 text-xs text-zinc-400" rel="noreferrer"><ShieldCheck size={13} /> Buat token di GitHub</a></>}
+            {hasGithubAccount === 'yes' && <><input type="text" value={accountLabel} onChange={(e) => setAccountLabel(e.target.value)} placeholder="Nama profil akun (contoh: Akun Personal)" className="input-modern text-sm" /><input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Masukkan Personal Access Token" className="input-modern text-sm" /><button onClick={() => validateToken(token)} className="btn-modern w-full text-sm py-2.5">Tambah akun</button>{accounts.length > 0 && <div className="rounded-xl border border-white/10 p-2 space-y-2"><p className="text-xs text-zinc-400">Pilih akun aktif</p>{accounts.map((acc) => <button key={acc.id} onClick={() => acc.id && setActiveAccount(acc.id)} className={`w-full text-left text-xs p-2 rounded-lg border ${user?.id === acc.id ? 'border-brand/40 bg-brand/10 text-white' : 'border-white/10 text-zinc-300'}`}><div className="flex items-center justify-between"><span>{acc.label} (@{acc.username})</span><span className="text-[10px] text-zinc-500">{maskToken(acc.token)}</span></div><div className="text-[10px] text-zinc-500 mt-1">{acc.tokenType} • divalidasi {new Date(acc.lastValidatedAt).toLocaleString('id-ID')}</div></button>)}</div>}<a href="https://github.com/settings/tokens/new?scopes=repo,delete_repo&description=RepoFlow_App" target="_blank" className="inline-flex items-center gap-2 text-xs text-zinc-400" rel="noreferrer"><ShieldCheck size={13} /> Buat token di GitHub</a></>}
           </div>
         ) : <div className="p-2.5 rounded-xl bg-brand/[0.08] border border-brand/25 flex items-center gap-2.5"><img src={user.avatarUrl} alt={user.username} className="w-8 h-8 rounded-lg" /><p className="text-xs text-zinc-200">Login sebagai <span className="font-semibold text-white">@{user.username}</span></p></div>}
       </section>
@@ -1154,6 +1174,7 @@ export default function App() {
               <motion.div key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.18 }}>
                 {(error || success) && <div className={`mb-3 p-2.5 rounded-xl text-xs flex items-center gap-2 border ${error ? 'bg-red-500/10 border-red-500/20 text-red-300' : 'bg-green-500/10 border-green-500/20 text-green-300'}`}>{error ? <AlertCircle size={15} /> : <CheckCircle2 size={15} />} {error || success}</div>}
                 {tokenDebugHint && <div className="mb-3 p-2.5 rounded-xl text-[11px] border bg-amber-500/10 border-amber-500/20 text-amber-200">{tokenDebugHint}</div>}
+                {tokenDiagnostics && <div className="mb-3 p-2.5 rounded-xl text-[11px] border bg-blue-500/10 border-blue-500/20 text-blue-200">Status akun: {tokenDiagnostics}</div>}
                 {tab === 'dashboard' && renderDashboard()}
                 {tab === 'upload' && renderUpload()}
                 {tab === 'tools' && renderTools()}
